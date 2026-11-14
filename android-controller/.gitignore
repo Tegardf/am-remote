@@ -1,0 +1,50 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+migrate_working_dir/
+
+# IntelliJ / Android Studio
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# Flutter / Dart / pub
+**/doc/api/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+
+# Generated code: NOT committed. Re-create with:
+#   dart run build_runner build --delete-conflicting-outputs
+*.g.dart
+*.freezed.dart
+*.mocks.dart
+
+# Android
+/android/.gradle/
+/android/captures/
+/android/local.properties
+/android/key.properties
+/android/app/debug
+/android/app/profile
+/android/app/release
+**/.cxx/
+*.jks
+*.keystore
+
+# Symbolication / obfuscation
+app.*.symbols
+app.*.map.json

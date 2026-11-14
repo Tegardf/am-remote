@@ -1,0 +1,33 @@
+# Root of the am-remote monorepo. Each project also has its own .gitignore.
+
+# OS / editors
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+.idea/
+*.iml
+.history/
+.vscode/*
+!.vscode/extensions.json
+
+# Claude Code: personal settings and temporary worktrees, in any folder.
+# The shared setup (.claude/settings.json, skills, workflows, rules, hooks) IS committed.
+**/.claude/settings.local.json
+**/.claude/worktrees/
+CLAUDE.local.md
+
+# Secrets and local environment
+.env
+.env.*
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+key.properties
+
+# Logs and scratch
+*.log
+tmp/

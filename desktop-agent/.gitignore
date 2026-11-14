@@ -1,0 +1,17 @@
+# Rust build output
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo.lock IS committed: this is a binary crate.
+
+# Runtime config lives in %APPDATA%\am-remote\config.json and contains tokens.
+# Never copy it into the repo.
+/config.json
+*.local.json
+
+# Release packaging output
+/dist/
+
+# Spike scratch output (the reports in docs/spikes/*.md are committed)
+/docs/spikes/*.log

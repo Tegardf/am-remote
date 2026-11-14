@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(cargo --version)",
+      "Bash(rustup show *)",
+      "Bash(cargo fmt *)",
+      "Bash(cargo check *)",
+      "Bash(cargo clippy *)",
+      "Bash(cargo test *)",
+      "Bash(cargo build *)",
+      "Bash(cargo tree *)",
+      "Bash(cargo add *)",
+      "Bash(cargo run --example *)",
+      "PowerShell(cargo --version)",
+      "PowerShell(rustup show *)",
+      "PowerShell(cargo fmt *)",
+      "PowerShell(cargo check *)",
+      "PowerShell(cargo clippy *)",
+      "PowerShell(cargo test *)",
+      "PowerShell(cargo build *)",
+      "PowerShell(cargo tree *)",
+      "PowerShell(cargo add *)",
+      "PowerShell(cargo run --example *)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)"
+    ],
+    "deny": [
+      "Edit(../CLAUDE.md)",
+      "Edit(../contract/**)",
+      "Edit(../android-controller/**)"
+    ],
+    "additionalDirectories": ["../contract"]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/format-on-edit.mjs\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
