@@ -195,6 +195,46 @@ Edited only from the root window via `/contract-change`.
 }
 ```
 
+### error_bad_request
+```json
+{
+  "error": {
+    "code": "BAD_REQUEST",
+    "message": "Request body is not valid JSON"
+  }
+}
+```
+
+### error_not_found
+```json
+{
+  "error": {
+    "code": "NOT_FOUND",
+    "message": "No such route"
+  }
+}
+```
+
+### error_method_not_allowed
+```json
+{
+  "error": {
+    "code": "METHOD_NOT_ALLOWED",
+    "message": "Method not allowed"
+  }
+}
+```
+
+### error_no_audio_session
+```json
+{
+  "error": {
+    "code": "NO_AUDIO_SESSION",
+    "message": "Apple Music has no audio session yet"
+  }
+}
+```
+
 ## WebSocket messages
 
 ### ws_state

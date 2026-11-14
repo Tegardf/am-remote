@@ -1,0 +1,39 @@
+[package]
+name = "am-remote-agent"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.104"
+async-trait = "0.1.92"
+axum = { version = "0.8.9", features = ["ws"] }
+base64 = "0.23.1"
+gethostname = "1.1.0"
+getrandom = "0.4.3"
+mdns-sd = "0.21.7"
+reqwest = { version = "0.13.5", features = ["json", "query"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+subtle = "2.6.1"
+tao = "0.37.2"
+tokio = { version = "1.54.1", features = ["full"] }
+tower-http = { version = "0.7.1", features = ["catch-panic"] }
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+tray-icon = "0.26.1"
+url = "2.5.8"
+windows = { version = "0.62.2", features = ["Media_Control", "Foundation", "Foundation_Collections", "Storage_Streams", "Win32_Foundation", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Threading", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Accessibility", "Win32_Globalization", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[dev-dependencies]
+futures-util = "0.3.34"
+http-body-util = "0.1.5"
+tempfile = "3.27.0"
+tokio-tungstenite = "0.30.0"
+tower = { version = "0.5.3", features = ["util"] }
+windows = { version = "0.62.2", features = ["Win32_Media_Audio_Endpoints", "Win32_UI_Input_KeyboardAndMouse"] }
+
+[features]
+# UI Automation of the Apple Music window: library playlists and playing a song or playlist.
+# On by default; build with --no-default-features to leave it out (those endpoints then answer 501).
+default = ["uia"]
+uia = []

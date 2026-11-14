@@ -6,7 +6,7 @@ Windows background app (Rust) that controls the Apple Music app and serves the a
 - Conventions, structure and implementation notes: [CLAUDE.md](CLAUDE.md)
 - API contract (shared with the app): [../CLAUDE.md](../CLAUDE.md) and [../contract/](../contract/)
 
-> **Status:** not scaffolded yet. `/build-mvp 0` in this window creates the crate.
+> **Status:** MVP 0, 1, 2 and 3 are done. The roadmap is complete; MVP 3 passed its manual smoke test (`docs/smoke-tests/mvp-3.md`).
 
 ## What to install
 
@@ -88,5 +88,5 @@ This window never changes the contract. Gaps go to `docs/contract-requests.md`, 
 | `link.exe not found` / `LNK1181` | Build Tools "Desktop development with C++" workload missing, or the GNU toolchain is active: `rustup default stable-x86_64-pc-windows-msvc` |
 | `cargo` not recognised after installing | Open a new terminal or VS Code window (PATH is read at start) |
 | Agent says Apple Music is not running | It must be the Microsoft Store **Apple Music** app (not iTunes), and it must be running |
-| Volume endpoints fail before anything has played | Windows only creates Apple Music's audio session after its first playback. Play something once (open question #3 in `../contract/README.md`) |
+| Volume endpoints fail before anything has played | Windows only creates Apple Music's audio session after its first playback. They answer `409 NO_AUDIO_SESSION` (playback buttons still work). Play something once |
 | Phone can't find the laptop | Wi-Fi profile Private, firewall rule above, same network, no guest/AP isolation. Use manual IP in the app |

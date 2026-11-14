@@ -13,6 +13,7 @@ The Flutter Android app: the remote. It finds the desktop agent on your Wi-Fi, p
 |---|---|---|---|
 | 1 | **Flutter SDK** (stable channel; includes Dart) | build and run the app | https://docs.flutter.dev/get-started/install/windows/mobile → unzip to e.g. `C:\src\flutter` (not under `Program Files`) → add `C:\src\flutter\bin` to your user `PATH` |
 | 2 | **Android Studio** | Android SDK, platform-tools (adb), build-tools, emulator, bundled JDK | https://developer.android.com/studio → install → SDK Manager → *SDK Tools* → tick **Android SDK Command-line Tools (latest)** |
+| 2b | **Android NDK (Side by side)**, the version Flutter asks for (28.2.13676358 on Flutter 3.50) | Flutter's Gradle setup requires it even for a Dart-only app; without it `flutter build apk` fails with "Android sdkmanager did not install NDK" | SDK Manager → *SDK Tools* → tick **Show Package Details** → **NDK (Side by side)** → that version. Or: `sdkmanager --install "ndk;28.2.13676358"` |
 | 3 | Android licenses | required by Flutter's Android build | `flutter doctor --android-licenses` → accept all |
 | 4 | **Android phone**, Android 7.0+ (API 24) | discovery needs a real device on the same Wi-Fi | Settings → About phone → tap *Build number* 7× → Developer options → **USB debugging** (or **Wireless debugging**) |
 | 5 | VS Code extension **Flutter** (installs **Dart**) | editing, run/debug | VS Code Extensions → "Flutter" |

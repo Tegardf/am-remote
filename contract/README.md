@@ -37,10 +37,6 @@ Only from the root window, with `/contract-change <what>` (or `/contract-change 
 4. Then, in each project window, `/sync-contract` applies it to the code.
 
 ## Open questions
-The contract doesn't answer these yet. Settle each one with `/contract-change`, then delete it from this list.
+None open. Everything raised so far is settled in C-001 to C-005 (see [CHANGELOG.md](CHANGELOG.md)).
 
-1. **Validation errors have no code.** A malformed JSON body, a missing `code` in `/pair`, or an out-of-range `level` all need a response, but the error list has no `400`. axum's default rejection is a plain-text 400/422, which breaks the error-body rule. Suggestion: add `BAD_REQUEST` (400).
-2. **Empty PlayerState.** When nothing is loaded, are `title`/`artist`/`album` `null` or `""`? Are `duration_ms`/`position_ms` `0` or `null`?
-3. **Volume before the first playback.** Windows only creates Apple Music's audio session after it has played something. What do `GET/POST /volume` return until then? `409 APPLE_MUSIC_NOT_RUNNING` would be misleading.
-4. **`artwork_url` vs "no internet traffic".** `SearchResult.artwork_url` is an internet HTTPS URL, but `android-controller/CLAUDE.md` says the app makes no internet traffic. Either allow HTTPS image loads, or have the agent proxy search artwork.
-5. **`/status` before pairing.** As written, `/status` needs a token. Should it be public, so the app can check reachability before pairing? The mDNS TXT record already gives the version.
+When something in the contract turns out to be unclear, add it here (numbered) or log it in the project's `docs/contract-requests.md`, then settle it with `/contract-change`.

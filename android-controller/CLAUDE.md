@@ -34,14 +34,15 @@ lib/
 - Re-fetch `/player/artwork` only when `artwork_rev` changes.
 - Interpolate the progress bar locally between `state` events while `status == playing`.
 - On `APPLE_MUSIC_NOT_RUNNING`: show a "Open Apple Music on your laptop" empty state, keep the socket alive.
+- On `NO_AUDIO_SESSION` (only `/volume` answers it: Apple Music is there, nothing has played yet): switch off only the volume slider and mute button, with a short note. Keep the playback buttons and now-playing view, and do not show the "Open Apple Music" empty state. The last volume level is stale when `apple_music` turns false or a volume call answers `409`: read `GET /volume` again when Apple Music runs again, when playback starts, and after a socket reconnect.
 - On `401`: clear token, go back to pairing.
-- On Wi-Fi loss: show offline banner, reconnect automatically; re-run discovery if the saved host fails.
+- On Wi-Fi loss: show offline banner, reconnect automatically; re-run discovery if the saved host fails (after 3 failed checks in a row). The TXT `ip` can be out of date after a DHCP renewal or a Wi-Fi switch, so when following the laptop the app tries `ip` first, then the other IPv4 addresses the resolver gave, and moves to the first one that answers `GET /status`; if none does, it stays and tries again next round.
 - Search box: debounce 300 ms, min 2 chars.
 - Hardware volume keys control laptop volume while the Player screen is in front (MVP 1 nice-to-have).
 
 ## Android config
-- `AndroidManifest.xml`: `INTERNET`, `ACCESS_NETWORK_STATE`, `CHANGE_WIFI_MULTICAST_STATE`; `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_MEDIA_PLAYBACK` for `audio_service`.
-- Cleartext HTTP to the LAN is required: add `network_security_config.xml` allowing cleartext (LAN only; no internet traffic in this app).
+- `AndroidManifest.xml`: `INTERNET`, `ACCESS_NETWORK_STATE`, `CHANGE_WIFI_MULTICAST_STATE`; `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_MEDIA_PLAYBACK` for `audio_service`, `POST_NOTIFICATIONS` (Android 13+, so the media notification can show) and `WAKE_LOCK` (`audio_service` takes it when the session starts playing; without it the notification is never posted, as seen on the emulator).
+- Cleartext HTTP to the LAN is required: add `network_security_config.xml` allowing cleartext (LAN only: plain HTTP goes only to the paired agent. The one other kind of traffic is search artwork, which is loaded directly over HTTPS).
 
 ## Commands
 ```
@@ -53,8 +54,8 @@ flutter analyze && flutter test
 ```
 
 ## Current status
-- Contract changes applied: C-000 (see ../contract/CHANGELOG.md; update via /sync-contract)
-- [ ] MVP 0 — connect screen, discovery, manual IP, pairing, connection indicator
-- [ ] MVP 1 — play/pause/next/prev, volume slider, mute
-- [ ] MVP 2 — now-playing card, artwork, progress/seek, media notification
-- [ ] MVP 3 — playlists screen, search screen, bottom nav
+- Contract changes applied: C-005 (see ../contract/CHANGELOG.md; update via /sync-contract)
+- [x] MVP 0 — connect screen, discovery, manual IP, pairing, connection indicator
+- [x] MVP 1 — play/pause/next/prev, volume slider, mute
+- [x] MVP 2 — now-playing card, artwork, progress/seek, media notification
+- [x] MVP 3 — playlists screen, search screen, bottom nav
