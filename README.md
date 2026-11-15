@@ -70,7 +70,7 @@ The API both sides follow is written in [`CLAUDE.md`](CLAUDE.md) ("API contract 
 | MVP 1 | Play, pause, next, previous, volume, mute | ✅ |
 | MVP 2 | Now playing, artwork, seek, live updates, media notification | ✅ |
 | MVP 3 | Playlists and search | ✅ |
-| MVP 4 | Shuffle/repeat, Up Next queue, search through the Apple Music app | ✅ agent · app in progress |
+| MVP 4 | Shuffle/repeat, Up Next queue, search through the Apple Music app | ✅  |
 
 "Built" means the code exists and its checks passed. How well it works on a real laptop and phone is covered by the manual smoke-test checklists in each project's `docs/smoke-tests/`.
 
