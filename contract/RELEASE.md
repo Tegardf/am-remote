@@ -1,5 +1,25 @@
 # Release plan: v1 freeze (am-remote)
 
+## Now: v0.2.0 (MVP 4) — written 2026-11-15
+v0.1.0 was committed (`111bc09`, not yet tagged). MVP 4 (C-006) is built in both projects, the last `/contract-check` found no breaking mismatch, and **C-007 is the last contract change for v0.2.0: the contract is frozen again** (same freeze rule as section 3: later findings go to the backlog, not the contract).
+
+| # | Window | What |
+|---|---|---|
+| 1 | desktop-agent | `/sync-contract` (C-007: timeout → `500`, conformance #1), then `/verify` in both modes (with and without `uia`) |
+| 2 | android-controller | `/sync-contract` (marker C-007, conformance #2: emoji minimum), tick MVP 4 in `./CLAUDE.md` once its smoke test passed |
+| 3 | android-controller | new launcher icon: "follow `.claude/tasks/app-icon.md`" |
+| 4 | both | versions: `desktop-agent/Cargo.toml` → `version = "0.2.0"`; `android-controller/pubspec.yaml` → `version: 0.2.0+2` (the `+2` build number must be higher than the current `+1`) |
+| 5 | both | `/verify`, then `cargo build --release` and `flutter build apk --release` |
+| 6 | laptop + phone | `docs/smoke-tests/mvp-4.md` in both projects, plus a quick MVP 0–3 pass |
+| 7 | laptop | install the agent to start at login: `desktop-agent/README.md` → "Install: start automatically at login" |
+| 8 | root | commit, then tag: `git tag v0.1.0 111bc09` (optional, marks the old one) and `git tag v0.2.0` on the release commit |
+
+Known limits shipped in v0.2.0 (in the contract, not bugs): the queue shows only about the next 20 songs; tapping a queue row skips through the songs before it; app-search results have no artwork; catalog playlists, artists and other kinds from app search answer "can't play yet"; queue and search use visibly move the Apple Music window.
+
+---
+
+The sections below are the v0.1.0 plan, kept for reference.
+
 Written 2026-11-14 after the last `/contract-check` (contract at C-004, both projects applied it).
 Goal: stop the "fix, then the contract changes again" loop and define the last change before a release version.
 

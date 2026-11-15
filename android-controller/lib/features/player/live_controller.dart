@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/api_client.dart';
+import '../../core/models/modes.dart';
 import '../../core/models/player_state.dart';
 import '../../core/models/volume.dart';
 import '../../core/models/ws_message.dart';
@@ -53,6 +54,8 @@ class LiveState {
     this.link = WsLinkStatus.disconnected,
     this.volume,
     this.volumeSeq = 0,
+    this.modes,
+    this.modesSeq = 0,
   });
 
   /// The latest `PlayerState`, and when it arrived (for the progress bar).
@@ -75,6 +78,11 @@ class LiveState {
   final Volume? volume;
   final int volumeSeq;
 
+  /// The latest pushed shuffle and repeat state (MVP 4), counted like
+  /// [volumeSeq].
+  final Modes? modes;
+  final int modesSeq;
+
   LiveState copyWith({
     PlayerState? player,
     DateTime? playerReceivedAt,
@@ -85,6 +93,8 @@ class LiveState {
     WsLinkStatus? link,
     Volume? volume,
     int? volumeSeq,
+    Modes? modes,
+    int? modesSeq,
   }) => LiveState(
     player: player ?? this.player,
     playerReceivedAt: playerReceivedAt ?? this.playerReceivedAt,
@@ -94,6 +104,8 @@ class LiveState {
     link: link ?? this.link,
     volume: volume ?? this.volume,
     volumeSeq: volumeSeq ?? this.volumeSeq,
+    modes: modes ?? this.modes,
+    modesSeq: modesSeq ?? this.modesSeq,
   );
 }
 
@@ -162,6 +174,8 @@ class LiveController extends Notifier<LiveState> {
         state = state.copyWith(volume: volume, volumeSeq: state.volumeSeq + 1);
       case AppleMusicEvent(:final running):
         state = state.copyWith(appleMusicRunning: running);
+      case ModesEvent(:final modes):
+        state = state.copyWith(modes: modes, modesSeq: state.modesSeq + 1);
       case PongEvent():
         break;
     }

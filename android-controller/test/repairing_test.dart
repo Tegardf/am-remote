@@ -76,7 +76,11 @@ void main() {
       final session = container.read(sessionControllerProvider.notifier);
       await session.ready;
 
-      client.searchError = const ApiException('UNAUTHORIZED', 'revoked', 401);
+      client.appSearchError = const ApiException(
+        'UNAUTHORIZED',
+        'revoked',
+        401,
+      );
       container.read(searchControllerProvider.notifier)
         ..setQuery('example')
         ..submit();
@@ -88,7 +92,7 @@ void main() {
 
       await session.handleUnauthorized();
       await pumpEventQueue(); // the app shows the connect screen meanwhile
-      client.searchError = null;
+      client.appSearchError = null;
       await session.completePairing(testAgent, fakeToken);
       await pumpEventQueue();
 

@@ -7,7 +7,10 @@ import 'package:am_remote/core/agent_address.dart';
 import 'package:am_remote/core/api_client.dart';
 import 'package:am_remote/core/discovery.dart';
 import 'package:am_remote/core/models/agent_status.dart';
+import 'package:am_remote/core/models/app_search.dart';
+import 'package:am_remote/core/models/modes.dart';
 import 'package:am_remote/core/models/pair_response.dart';
+import 'package:am_remote/core/models/queue_item.dart';
 import 'package:am_remote/core/models/player_state.dart';
 import 'package:am_remote/core/models/playlist.dart';
 import 'package:am_remote/core/models/search_result.dart';
@@ -206,6 +209,150 @@ class FakeApiClient implements ApiClient {
     playedTracks.add(url);
     await playGate?.future;
     final error = playError;
+    if (error != null) throw error;
+  }
+
+  // MVP 4: shuffle and repeat, the queue, and Apple Music's own search.
+  Modes modes = const Modes();
+  int getModesCalls = 0;
+  final setModesCalls = <({bool? shuffle, RepeatSetting? repeat})>[];
+  Object? modesError;
+  Completer<void>? modesGate;
+
+  @override
+  Future<Modes> getModes() async {
+    getModesCalls++;
+    final snapshot = modes;
+    await modesGate?.future;
+    final error = modesError;
+    if (error != null) throw error;
+    return snapshot;
+  }
+
+  @override
+  Future<Modes> setModes({bool? shuffle, RepeatSetting? repeat}) async {
+    setModesCalls.add((shuffle: shuffle, repeat: repeat));
+    await modesGate?.future;
+    final error = modesError;
+    if (error != null) throw error;
+    // What Apple Music reads back after the change.
+    modes = Modes(
+      shuffle: shuffle ?? modes.shuffle,
+      repeat: repeat ?? modes.repeat,
+    );
+    return modes;
+  }
+
+  List<QueueItem> queue = const [
+    QueueItem(
+      index: 0,
+      title: 'Queue Song 0',
+      artist: 'Artist 0',
+      album: 'Album 0',
+      durationMs: 200000,
+    ),
+    QueueItem(
+      index: 1,
+      title: 'Queue Song 1',
+      artist: 'Artist 1',
+      durationMs: 180000,
+    ),
+    QueueItem(
+      index: 2,
+      title: 'Auto Song 2',
+      artist: 'Artist 2',
+      source: 'autoplay',
+    ),
+  ];
+  int getQueueCalls = 0;
+  Object? queueError;
+  Completer<void>? queueGate;
+  final playedQueue = <({int index, String title})>[];
+  Object? queuePlayError;
+  Completer<void>? queuePlayGate;
+
+  @override
+  Future<List<QueueItem>> getQueue() async {
+    getQueueCalls++;
+    final snapshot = queue;
+    await queueGate?.future;
+    final error = queueError;
+    if (error != null) throw error;
+    return snapshot;
+  }
+
+  @override
+  Future<void> playQueueItem(int index, String title) async {
+    playedQueue.add((index: index, title: title));
+    await queuePlayGate?.future;
+    final error = queuePlayError;
+    if (error != null) throw error;
+  }
+
+  List<AppSearchResult> appResults = const [
+    AppSearchResult(
+      section: 'Songs',
+      index: 0,
+      kind: 'song',
+      title: 'Example Song',
+      subtitle: 'Example Artist',
+    ),
+    AppSearchResult(
+      section: 'Songs',
+      index: 1,
+      kind: 'song',
+      title: 'Second Song',
+      subtitle: 'Example Artist',
+    ),
+    AppSearchResult(
+      section: 'Albums',
+      index: 0,
+      kind: 'album',
+      title: 'Example Album',
+      subtitle: 'Example Artist',
+    ),
+  ];
+  final appSearchCalls = <({String q, SearchScope scope})>[];
+  Object? appSearchError;
+  Completer<void>? appSearchGate;
+  final playedAppResults =
+      <
+        ({String q, SearchScope scope, String section, int index, String title})
+      >[];
+  Object? appPlayError;
+  Completer<void>? appPlayGate;
+
+  @override
+  Future<List<AppSearchResult>> appSearch(
+    String q, {
+    SearchScope scope = SearchScope.catalog,
+  }) async {
+    appSearchCalls.add((q: q, scope: scope));
+    // The answer the laptop had when asked, even if it arrives late.
+    final snapshot = appResults;
+    await appSearchGate?.future;
+    final error = appSearchError;
+    if (error != null) throw error;
+    return snapshot;
+  }
+
+  @override
+  Future<void> playAppResult({
+    required String q,
+    required SearchScope scope,
+    required String section,
+    required int index,
+    required String title,
+  }) async {
+    playedAppResults.add((
+      q: q,
+      scope: scope,
+      section: section,
+      index: index,
+      title: title,
+    ));
+    await appPlayGate?.future;
+    final error = appPlayError;
     if (error != null) throw error;
   }
 

@@ -33,15 +33,27 @@ pub fn harness() -> Harness {
 
 /// A harness with a custom fake backend and, optionally, a shorter WebSocket idle timeout.
 pub fn harness_with(media: FakeBackend, ws_idle_timeout: Option<std::time::Duration>) -> Harness {
+    harness_custom(media, |state| {
+        if let Some(timeout) = ws_idle_timeout {
+            state.ws_idle_timeout = timeout;
+        }
+    })
+}
+
+/// A harness whose WebSocket looks at shuffle and repeat every `poll` instead of every 2 s.
+pub fn harness_with_modes_poll(poll: std::time::Duration) -> Harness {
+    harness_custom(FakeBackend::new(true), |state| state.ws_modes_poll = poll)
+}
+
+/// A harness with a custom fake backend and any change to the app state before the router is built.
+pub fn harness_custom(media: FakeBackend, tweak: impl FnOnce(&mut AppState)) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.json");
     let store = Arc::new(ConfigStore::open(config_path.clone()).unwrap());
     let media = Arc::new(media);
     let search = Arc::new(FakeSearch::default());
     let mut state = AppState::new(store, media.clone(), search.clone()).unwrap();
-    if let Some(timeout) = ws_idle_timeout {
-        state.ws_idle_timeout = timeout;
-    }
+    tweak(&mut state);
     Harness {
         app: api::router(state.clone()),
         state,

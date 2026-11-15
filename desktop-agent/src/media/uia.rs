@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use tokio::sync::oneshot;
-use windows::core::{Interface, BOOL, HSTRING};
+use windows::core::{Interface, BOOL, BSTR, HSTRING};
 use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
@@ -23,22 +23,31 @@ use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
     IUIAutomationScrollItemPattern, IUIAutomationScrollPattern, IUIAutomationSelectionItemPattern,
-    ScrollAmount_LargeIncrement, ScrollAmount_NoAmount, TreeScope_Descendants,
-    UIA_AutomationIdPropertyId, UIA_ButtonControlTypeId, UIA_ControlTypePropertyId,
-    UIA_InvokePatternId, UIA_IsScrollPatternAvailablePropertyId, UIA_ListItemControlTypeId,
-    UIA_MenuItemControlTypeId, UIA_NamePropertyId, UIA_ScrollItemPatternId, UIA_ScrollPatternId,
-    UIA_SelectionItemPatternId, UIA_TextControlTypeId,
+    IUIAutomationTogglePattern, IUIAutomationValuePattern, ScrollAmount_LargeIncrement,
+    ScrollAmount_NoAmount, TreeScope_Descendants, UIA_AutomationIdPropertyId,
+    UIA_ButtonControlTypeId, UIA_ControlTypePropertyId, UIA_EditControlTypeId, UIA_InvokePatternId,
+    UIA_IsScrollPatternAvailablePropertyId, UIA_ListItemControlTypeId, UIA_MenuItemControlTypeId,
+    UIA_NamePropertyId, UIA_ScrollItemPatternId, UIA_ScrollPatternId, UIA_SelectionItemPatternId,
+    UIA_TextControlTypeId, UIA_TogglePatternId, UIA_ValuePatternId,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetClassNameW, GetWindowThreadProcessId, ShowWindow, SW_RESTORE, SW_SHOWNORMAL,
 };
 
+use super::appsearch::{
+    can_play, parse_result, AppSearchResult, Kind, Scope, SCOPE_CATALOG_ID, SCOPE_LIBRARY_ID,
+    SEARCH_BOX_ID, SEARCH_BUTTON_ID, STATUS_TEXT_ID, SUGGESTIONS_LIST_ID,
+};
 use super::audio::{is_apple_music_path, process_path};
 use super::library::{
     find_track_row, is_page_row_name, menu_item_plays, playlist_from_sidebar_item, same_text,
     Playlist, PAGE_HEADER_ID, PLAYLISTS_HEADER_ID, PLAY_BUTTON_ID,
 };
+use super::modes::{repeat_from_name, repeat_presses, Modes, Repeat};
+use super::modes::{REPEAT_BUTTON_ID, SHUFFLE_BUTTON_ID};
+use super::queue::{queue_item, QueueItem, QueueSource};
+use super::queue::{AUTOPLAY_LIST_ID, MAX_ROWS, QUEUE_LIST_ID, QUEUE_TOGGLE_ID};
 use super::MediaError;
 
 /// How long a handler waits for the whole UI operation before answering `INTERNAL`.
@@ -87,6 +96,9 @@ pub enum UiaError {
     NotFound(String),
     /// Apple Music's UI did not behave as expected: which step failed.
     Failed(String),
+    /// The UI was driven as intended but did not end up in the asked state, or did not answer in
+    /// time (shuffle or repeat did not change, a search did not finish): contract `500`.
+    Unchanged(String),
 }
 
 impl From<UiaError> for MediaError {
@@ -95,6 +107,7 @@ impl From<UiaError> for MediaError {
             UiaError::NotRunning => Self::NotRunning,
             UiaError::NotFound(message) => Self::NotFound(message),
             UiaError::Failed(message) => Self::NotSupported(message),
+            UiaError::Unchanged(message) => Self::Internal(message),
         }
     }
 }
@@ -537,16 +550,21 @@ impl Driver {
             ));
         }
         self.wait_for_page(&window, album, PageKind::Album)?;
+        self.play_song_row(&window, title)
+    }
 
+    /// On an open album page: finds the song's row (scrolling down if needed), opens its menu and
+    /// presses `Play “<title>”`.
+    fn play_song_row(&self, window: &IUIAutomationElement, title: &str) -> Result<(), UiaError> {
         // The song row: scroll the page down until it shows up.
         let mut scrolls = 0;
         let row = wait_for(PAGE_WAIT, || {
-            let rows = self.page_rows(&window);
+            let rows = self.page_rows(window);
             let names: Vec<String> = rows.iter().map(|(_, name)| name.clone()).collect();
             if let Some(index) = find_track_row(&names, title) {
                 return rows.into_iter().nth(index).map(|(row, _)| row);
             }
-            if !rows.is_empty() && scrolls < MAX_SCROLLS && self.scroll_page_down(&window) {
+            if !rows.is_empty() && scrolls < MAX_SCROLLS && self.scroll_page_down(window) {
                 scrolls += 1;
             }
             None
@@ -587,6 +605,661 @@ impl Driver {
                 ))
             }
         }
+    }
+}
+
+// ---------- MVP 4: shuffle and repeat, the queue, search through the app ----------
+
+/// AutomationId of the transport bar that holds shuffle, repeat and the play controls.
+// verified: spike mvp4, 2026-11-14
+const TRANSPORT_BAR_ID: &str = "TransportBar";
+/// AutomationId shared by the left navigation pane and the right queue pane (two elements).
+// verified: spike mvp4, 2026-11-14
+const PANE_ID: &str = "PaneRoot";
+/// The queue pane's "Playing Next" header (English UI); used only to recognise the pane.
+// verified: spike mvp4, 2026-11-14
+const PLAYING_NEXT_NAME: &str = "Playing Next";
+/// AutomationId of a result section's heading text (the section's Name equals it).
+// verified: spike mvp4, 2026-11-14
+const SECTION_HEADING_ID: &str = "JustTextBlock";
+/// AutomationId of the container a result section wraps its content in (its Name is the heading).
+// verified: spike mvp4, 2026-11-14
+const SECTION_CONTENT_ID: &str = "ShelfSectionContent";
+/// The first section of a catalog result page (it has no heading element of its own).
+// verified: spike mvp4, 2026-11-14
+const TOP_RESULTS: &str = "Top Results";
+
+/// Shuffle or repeat must show the asked state within this time after the last press.
+const MODES_WAIT: Duration = Duration::from_millis(1500);
+/// The queue pane must show up within this time after pressing its toolbar button.
+const QUEUE_WAIT: Duration = Duration::from_secs(3);
+/// The search box must show up within this time after pressing the sidebar search button.
+const SEARCH_BOX_WAIT: Duration = Duration::from_secs(4);
+/// The box needs a moment before it reacts to text (a `SetValue` 0.2 s after it appeared did
+/// nothing, see the spike); and the text is set again if nothing happened within this time.
+const BOX_SETTLE: Duration = Duration::from_millis(900);
+const SUGGESTION_WAIT: Duration = Duration::from_secs(2);
+/// The whole search (open, type, results page) must finish within this time.
+const SEARCH_WAIT: Duration = Duration::from_secs(12);
+/// A results page that shows its status text but no section for this long has no results.
+const EMPTY_RESULTS_WAIT: Duration = Duration::from_millis(2500);
+/// Time for the page to re-draw after scrolling or switching the scope.
+const SETTLE: Duration = Duration::from_millis(700);
+/// Pause after scrolling a page down before the sections are read (1.5 s worked in the spike).
+const SECTION_SCROLL_WAIT: Duration = Duration::from_millis(1500);
+/// How long a scroll step waits for the visible sections to fill in their items.
+const SECTION_FILL_WAIT: Duration = Duration::from_secs(2);
+/// How many scroll steps are taken through a result page at most.
+const MAX_SECTION_STEPS: usize = 14;
+/// Items read per section at most.
+const MAX_ITEMS_PER_SECTION: usize = 30;
+
+impl Driver {
+    fn is_visible(&self, element: &IUIAutomationElement) -> bool {
+        // SAFETY: plain UI Automation call.
+        unsafe { element.CurrentIsOffscreen() }
+            .map(|b| !b.as_bool())
+            .unwrap_or(false)
+    }
+
+    fn left_of(&self, element: &IUIAutomationElement) -> i32 {
+        // SAFETY: plain UI Automation call.
+        unsafe { element.CurrentBoundingRectangle() }
+            .map(|r| r.left)
+            .unwrap_or(0)
+    }
+
+    fn list_items_under(&self, root: &IUIAutomationElement) -> Vec<IUIAutomationElement> {
+        self.find_all(
+            root,
+            UIA_ControlTypePropertyId,
+            &VARIANT::from(UIA_ListItemControlTypeId.0),
+        )
+        .unwrap_or_default()
+    }
+
+    /// The texts of an element's `TextBlock`s, in tree order (a row's title, detail, duration).
+    fn text_parts(&self, element: &IUIAutomationElement) -> Vec<String> {
+        self.find_all(
+            element,
+            UIA_ControlTypePropertyId,
+            &VARIANT::from(UIA_TextControlTypeId.0),
+        )
+        .unwrap_or_default()
+        .iter()
+        .map(|text| self.name_of(text))
+        .filter(|text| !text.trim().is_empty())
+        .collect()
+    }
+
+    fn toggle_state(&self, element: &IUIAutomationElement) -> Option<i32> {
+        // SAFETY: plain UI Automation calls.
+        unsafe {
+            element
+                .GetCurrentPattern(UIA_TogglePatternId)
+                .and_then(|p| p.cast::<IUIAutomationTogglePattern>())
+                .and_then(|p| p.CurrentToggleState())
+        }
+        .ok()
+        .map(|state| state.0)
+    }
+
+    fn press_toggle(&self, element: &IUIAutomationElement, what: &str) -> Result<(), UiaError> {
+        // SAFETY: plain UI Automation calls.
+        unsafe {
+            element
+                .GetCurrentPattern(UIA_TogglePatternId)
+                .and_then(|p| p.cast::<IUIAutomationTogglePattern>())
+                .and_then(|p| p.Toggle())
+        }
+        .map_err(|e| failed(&format!("cannot switch {what}"), e))
+    }
+
+    /// The main window only if it is already visible: never restores a minimized one.
+    fn visible_main_window(&self) -> Option<IUIAutomationElement> {
+        self.apple_music_windows(Some(WINDOW_CLASS))
+            .into_iter()
+            .find(|w| self.is_visible(w) && self.find_by_id(w, NAV_VIEW_ID).is_some())
+    }
+
+    // ---------- shuffle and repeat ----------
+
+    /// Shuffle and repeat as the two transport-bar buttons show them.
+    fn read_modes(&self, window: &IUIAutomationElement) -> Result<Modes, UiaError> {
+        let bar = self
+            .find_by_id(window, TRANSPORT_BAR_ID)
+            .unwrap_or_else(|| window.clone());
+        let shuffle_button = self
+            .find_by_id(&bar, SHUFFLE_BUTTON_ID)
+            .ok_or_else(|| UiaError::Failed("the shuffle button was not found".into()))?;
+        let repeat_button = self
+            .find_by_id(&bar, REPEAT_BUTTON_ID)
+            .ok_or_else(|| UiaError::Failed("the repeat button was not found".into()))?;
+        let shuffle = match self.toggle_state(&shuffle_button) {
+            Some(0) => false,
+            Some(1) => true,
+            _ => return Err(UiaError::Failed("the shuffle state cannot be read".into())),
+        };
+        let repeat = repeat_from_name(&self.name_of(&repeat_button))
+            .ok_or_else(|| UiaError::Failed("the repeat state cannot be read".into()))?;
+        Ok(Modes { shuffle, repeat })
+    }
+
+    fn modes(&self) -> Result<Modes, UiaError> {
+        let window = self.main_window()?;
+        self.read_modes(&window)
+    }
+
+    /// For polling: `None` unless the window is visible and both buttons read fine.
+    fn modes_if_visible(&self) -> Option<Modes> {
+        let window = self.visible_main_window()?;
+        self.read_modes(&window).ok()
+    }
+
+    fn set_modes(&self, shuffle: Option<bool>, repeat: Option<Repeat>) -> Result<Modes, UiaError> {
+        let window = self.main_window()?;
+        let current = self.read_modes(&window)?;
+        let bar = self
+            .find_by_id(&window, TRANSPORT_BAR_ID)
+            .unwrap_or_else(|| window.clone());
+
+        if let Some(want) = shuffle.filter(|want| *want != current.shuffle) {
+            let button = self
+                .find_by_id(&bar, SHUFFLE_BUTTON_ID)
+                .ok_or_else(|| UiaError::Failed("the shuffle button was not found".into()))?;
+            self.press_toggle(&button, "shuffle")?;
+            let _ = want;
+        }
+        if let Some(want) = repeat {
+            for _ in 0..repeat_presses(current.repeat, want) {
+                let button = self
+                    .find_by_id(&bar, REPEAT_BUTTON_ID)
+                    .ok_or_else(|| UiaError::Failed("the repeat button was not found".into()))?;
+                let before = self.name_of(&button);
+                self.invoke(&button, "the repeat button")?;
+                // Wait for the label to change before pressing again.
+                let _ = wait_for(MODES_WAIT, || {
+                    let now = self.find_by_id(&bar, REPEAT_BUTTON_ID)?;
+                    (self.name_of(&now) != before).then_some(())
+                });
+            }
+        }
+        wait_for(MODES_WAIT, || {
+            self.read_modes(&window).ok().filter(|modes| {
+                shuffle.is_none_or(|want| modes.shuffle == want)
+                    && repeat.is_none_or(|want| modes.repeat == want)
+            })
+        })
+        .ok_or_else(|| {
+            UiaError::Unchanged("Apple Music did not change shuffle or repeat as asked".into())
+        })
+    }
+
+    // ---------- the queue ----------
+
+    /// Does this pane hold the play queue (the other `PaneRoot` is the navigation sidebar)?
+    fn is_queue_pane(&self, pane: &IUIAutomationElement) -> bool {
+        self.find_by_id(pane, QUEUE_LIST_ID).is_some()
+            || self.find_by_id(pane, AUTOPLAY_LIST_ID).is_some()
+            || self
+                .find_all(pane, UIA_NamePropertyId, &VARIANT::from(PLAYING_NEXT_NAME))
+                .is_ok_and(|found| !found.is_empty())
+    }
+
+    fn queue_pane(&self, window: &IUIAutomationElement) -> Option<IUIAutomationElement> {
+        self.find_all(window, UIA_AutomationIdPropertyId, &VARIANT::from(PANE_ID))
+            .ok()?
+            .into_iter()
+            .filter(|pane| self.is_queue_pane(pane))
+            .max_by_key(|pane| self.left_of(pane))
+    }
+
+    /// The queue pane, opened through its toolbar button if it was closed (it is left open).
+    /// The flag says whether it had to be opened just now.
+    fn open_queue_pane(
+        &self,
+        window: &IUIAutomationElement,
+    ) -> Result<(IUIAutomationElement, bool), UiaError> {
+        if let Some(pane) = self.queue_pane(window) {
+            return Ok((pane, false));
+        }
+        let button = self
+            .find_by_id(window, QUEUE_TOGGLE_ID)
+            .ok_or_else(|| UiaError::Failed("the queue button was not found".into()))?;
+        if self.toggle_state(&button) != Some(1) {
+            self.press_toggle(&button, "the queue pane")?;
+        }
+        let pane = wait_for(QUEUE_WAIT, || self.queue_pane(window))
+            .ok_or_else(|| UiaError::Failed("the queue pane did not open".into()))?;
+        Ok((pane, true))
+    }
+
+    /// The rows of "Playing Next" then "AutoPlay", at most [`MAX_ROWS`], numbered across both.
+    fn read_queue_rows(&self, pane: &IUIAutomationElement) -> Vec<QueueItem> {
+        let mut items: Vec<QueueItem> = Vec::new();
+        for (list_id, source) in [
+            (QUEUE_LIST_ID, QueueSource::Queue),
+            (AUTOPLAY_LIST_ID, QueueSource::Autoplay),
+        ] {
+            let Some(list) = self.find_by_id(pane, list_id) else {
+                continue;
+            };
+            for row in self.list_items_under(&list) {
+                if items.len() >= MAX_ROWS {
+                    return items;
+                }
+                if let Some(item) = queue_item(items.len(), source, &self.text_parts(&row)) {
+                    items.push(item);
+                }
+            }
+        }
+        items
+    }
+
+    fn queue(&self) -> Result<Vec<QueueItem>, UiaError> {
+        let window = self.main_window()?;
+        let (pane, just_opened) = self.open_queue_pane(&window)?;
+        if just_opened {
+            // The rows are filled in a moment after the pane appears.
+            thread::sleep(SETTLE);
+        }
+        Ok(self.read_queue_rows(&pane))
+    }
+
+    // ---------- search through the app ----------
+
+    fn search_box(&self, window: &IUIAutomationElement) -> Option<IUIAutomationElement> {
+        self.find_all(
+            window,
+            UIA_AutomationIdPropertyId,
+            &VARIANT::from(SEARCH_BOX_ID),
+        )
+        .ok()?
+        .into_iter()
+        .find(|element| {
+            // SAFETY: plain UI Automation call.
+            let is_edit = unsafe { element.CurrentControlType() } == Ok(UIA_EditControlTypeId);
+            is_edit && self.is_visible(element)
+        })
+    }
+
+    fn set_search_text(
+        &self,
+        search_box: &IUIAutomationElement,
+        text: &str,
+    ) -> Result<(), UiaError> {
+        // SAFETY: plain UI Automation calls; nothing is typed, the value is set through the pattern.
+        unsafe {
+            search_box
+                .GetCurrentPattern(UIA_ValuePatternId)
+                .and_then(|p| p.cast::<IUIAutomationValuePattern>())
+                .and_then(|p| p.SetValue(&BSTR::from(text)))
+        }
+        .map_err(|e| failed("cannot set the search text", e))
+    }
+
+    /// Does the results page say it shows the results for `query`?
+    fn status_matches(&self, window: &IUIAutomationElement, query: &str) -> bool {
+        self.find_by_id(window, STATUS_TEXT_ID)
+            .is_some_and(|status| {
+                self.name_of(&status)
+                    .to_lowercase()
+                    .contains(&query.to_lowercase())
+            })
+    }
+
+    /// The suggestion whose text is exactly the query (it runs the full search). The app shows it
+    /// lower-cased, so the comparison ignores case.
+    fn plain_suggestion(
+        &self,
+        window: &IUIAutomationElement,
+        query: &str,
+    ) -> Option<IUIAutomationElement> {
+        let list = self.find_by_id(window, SUGGESTIONS_LIST_ID)?;
+        self.list_items_under(&list)
+            .into_iter()
+            .find(|item| self.name_of(item).trim().to_lowercase() == query.to_lowercase())
+    }
+
+    /// The result sections currently realised on the page: wide list items whose Name is their own
+    /// heading text (or the first section, "Top Results").
+    fn page_sections(&self, window: &IUIAutomationElement) -> Vec<(String, IUIAutomationElement)> {
+        // SAFETY: plain UI Automation call.
+        let window_width = unsafe { window.CurrentBoundingRectangle() }
+            .map(|r| r.right - r.left)
+            .unwrap_or(0);
+        self.list_items_under(window)
+            .into_iter()
+            .filter_map(|item| {
+                // SAFETY: plain UI Automation call.
+                let rect = unsafe { item.CurrentBoundingRectangle() }.ok()?;
+                // The queue pane's rows and the sidebar are far narrower than the page.
+                if (rect.right - rect.left) * 10 < window_width * 4 {
+                    return None;
+                }
+                let name = self.name_of(&item);
+                // A section holds a container (or heading text) called like itself.
+                let named_like_itself = |id: &str| {
+                    self.find_by_id(&item, id)
+                        .is_some_and(|inner| self.name_of(&inner) == name)
+                };
+                let is_section = name == TOP_RESULTS
+                    || named_like_itself(SECTION_CONTENT_ID)
+                    || named_like_itself(SECTION_HEADING_ID);
+                (!name.is_empty() && is_section).then_some((name, item))
+            })
+            .collect()
+    }
+
+    /// Opens the search box if needed, sets the query, runs the search and waits until the results
+    /// page is up, then switches to `scope`.
+    fn run_search(
+        &self,
+        window: &IUIAutomationElement,
+        query: &str,
+        scope: Scope,
+    ) -> Result<(), UiaError> {
+        let search_box = match self.search_box(window) {
+            Some(search_box) => search_box,
+            None => {
+                let button = self
+                    .find_by_id(window, SEARCH_BUTTON_ID)
+                    .ok_or_else(|| UiaError::Failed("the search button was not found".into()))?;
+                self.invoke(&button, "the search button")?;
+                let found = wait_for(SEARCH_BOX_WAIT, || self.search_box(window))
+                    .ok_or_else(|| UiaError::Failed("the search box did not open".into()))?;
+                thread::sleep(BOX_SETTLE);
+                found
+            }
+        };
+
+        let deadline = Instant::now() + SEARCH_WAIT;
+        self.set_search_text(&search_box, query)?;
+        let mut set_at = Instant::now();
+        let mut attempts = 1;
+        let mut suggestion_invoked = false;
+        // Either the page updates by itself, or a suggestion equal to the query shows up and is
+        // invoked; if neither happens the text is set again (the box ignored it).
+        while !self.status_matches(window, query) {
+            if Instant::now() >= deadline {
+                return Err(UiaError::Unchanged(
+                    "Apple Music did not run the search in time".into(),
+                ));
+            }
+            if !suggestion_invoked {
+                if let Some(suggestion) = self.plain_suggestion(window, query) {
+                    self.invoke(&suggestion, "the search suggestion")?;
+                    suggestion_invoked = true;
+                } else if set_at.elapsed() >= SUGGESTION_WAIT && attempts < 3 {
+                    let again = self
+                        .search_box(window)
+                        .unwrap_or_else(|| search_box.clone());
+                    self.set_search_text(&again, query)?;
+                    set_at = Instant::now();
+                    attempts += 1;
+                }
+            }
+            thread::sleep(POLL);
+        }
+
+        // The page has its status text; wait for the first section (or decide there are none).
+        let shown_since = Instant::now();
+        while self.page_sections(window).is_empty() && shown_since.elapsed() < EMPTY_RESULTS_WAIT {
+            if Instant::now() >= deadline {
+                return Err(UiaError::Unchanged(
+                    "the search results did not show in time".into(),
+                ));
+            }
+            thread::sleep(POLL);
+        }
+        self.select_scope(window, scope)
+    }
+
+    fn select_scope(&self, window: &IUIAutomationElement, scope: Scope) -> Result<(), UiaError> {
+        let id = match scope {
+            Scope::Catalog => SCOPE_CATALOG_ID,
+            Scope::Library => SCOPE_LIBRARY_ID,
+        };
+        let button = wait_for(Duration::from_secs(2), || self.find_by_id(window, id))
+            .ok_or_else(|| UiaError::Failed("the search scope switch was not found".into()))?;
+        if self.toggle_state(&button) != Some(1) {
+            self.press_toggle(&button, "the search scope")?;
+            wait_for(Duration::from_secs(2), || {
+                (self.toggle_state(&button) == Some(1)).then_some(())
+            })
+            .ok_or_else(|| UiaError::Failed("the search scope did not switch".into()))?;
+            // The page re-filters its sections.
+            thread::sleep(SETTLE);
+            let _ = wait_for(Duration::from_secs(2), || {
+                (!self.page_sections(window).is_empty()).then_some(())
+            });
+        }
+        Ok(())
+    }
+
+    /// The sections in view with their items, once the page has stopped filling them in (after a
+    /// scroll a section shows its heading first and its items a moment later; moving on too early
+    /// scrolls it out again before it was ever read).
+    fn settled_sections(
+        &self,
+        window: &IUIAutomationElement,
+    ) -> Vec<(String, Vec<IUIAutomationElement>)> {
+        let deadline = Instant::now() + SECTION_FILL_WAIT;
+        let mut last: Vec<(String, usize)> = Vec::new();
+        loop {
+            let current: Vec<(String, Vec<IUIAutomationElement>)> = self
+                .page_sections(window)
+                .into_iter()
+                .map(|(name, section)| (name, self.list_items_under(&section)))
+                .collect();
+            let counts: Vec<(String, usize)> = current
+                .iter()
+                .map(|(name, items)| (name.clone(), items.len()))
+                .collect();
+            if (!current.is_empty() && counts == last) || Instant::now() >= deadline {
+                return current;
+            }
+            last = counts;
+            thread::sleep(POLL);
+        }
+    }
+
+    /// The page's vertical scroller: the largest vertically scrollable element (the sidebar and the
+    /// queue pane are narrower).
+    fn page_scroller(&self, window: &IUIAutomationElement) -> Option<IUIAutomationScrollPattern> {
+        let scrollers = self
+            .find_all(
+                window,
+                UIA_IsScrollPatternAvailablePropertyId,
+                &VARIANT::from(true),
+            )
+            .ok()?;
+        let mut page: Option<(i64, IUIAutomationScrollPattern)> = None;
+        for scroller in scrollers {
+            // SAFETY: plain UI Automation calls.
+            unsafe {
+                let Ok(pattern) = scroller
+                    .GetCurrentPattern(UIA_ScrollPatternId)
+                    .and_then(|p| p.cast::<IUIAutomationScrollPattern>())
+                else {
+                    continue;
+                };
+                if !pattern
+                    .CurrentVerticallyScrollable()
+                    .map(|b| b.as_bool())
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                let Ok(rect) = scroller.CurrentBoundingRectangle() else {
+                    continue;
+                };
+                let area = i64::from(rect.right - rect.left) * i64::from(rect.bottom - rect.top);
+                if page.as_ref().is_none_or(|(best, _)| area > *best) {
+                    page = Some((area, pattern));
+                }
+            }
+        }
+        page.map(|(_, pattern)| pattern)
+    }
+
+    /// Walks the result page from the top, scrolling a little at a time (only the sections near the
+    /// viewport exist in the tree), and calls `visit` once per section, in order of appearance,
+    /// with the section's items. `visit` returns true to stop.
+    fn walk_sections(
+        &self,
+        window: &IUIAutomationElement,
+        mut visit: impl FnMut(&str, Vec<IUIAutomationElement>) -> bool,
+    ) {
+        let scroller = self.page_scroller(window);
+        if let Some(scroller) = &scroller {
+            // SAFETY: plain UI Automation call.
+            unsafe {
+                let _ = scroller.SetScrollPercent(
+                    windows::Win32::UI::Accessibility::UIA_ScrollPatternNoScroll,
+                    0.0,
+                );
+            }
+            thread::sleep(SETTLE);
+        }
+        // A section first shows up with only its heading realised and gets its items as it scrolls
+        // into view, so it is visited again whenever more items are there than last time.
+        let mut seen: Vec<(String, usize)> = Vec::new();
+        for _ in 0..MAX_SECTION_STEPS {
+            let settled = self.settled_sections(window);
+            for (name, items) in settled {
+                let known = seen.iter().position(|(seen_name, _)| *seen_name == name);
+                let before = known.map_or(0, |at| seen[at].1);
+                if items.len() <= before {
+                    continue;
+                }
+                match known {
+                    Some(at) => seen[at].1 = items.len(),
+                    None => seen.push((name.clone(), items.len())),
+                }
+                if visit(&name, items) {
+                    return;
+                }
+            }
+            // Half a viewport further down. Whatever lies below the viewport is not realised yet, so
+            // the page must be given time to fill in before it is read, and the steps must overlap:
+            // a whole page at a time (or a short wait) skipped the Albums and Songs sections.
+            let Some(scroller) = &scroller else {
+                return;
+            };
+            // SAFETY: plain UI Automation calls.
+            unsafe {
+                let percent = scroller.CurrentVerticalScrollPercent().unwrap_or(100.0);
+                let view = scroller.CurrentVerticalViewSize().unwrap_or(100.0);
+                if percent >= 99.5 || view >= 99.5 {
+                    return;
+                }
+                // `view` is the visible share of the content and the scroll percent a share of
+                // the scrollable range, so half a viewport is this many percent of the range.
+                let step = (0.5 * (view / 100.0) / (1.0 - view / 100.0) * 100.0).max(8.0);
+                let _ = scroller.SetScrollPercent(
+                    windows::Win32::UI::Accessibility::UIA_ScrollPatternNoScroll,
+                    (percent + step).min(100.0),
+                );
+            }
+            thread::sleep(SECTION_SCROLL_WAIT);
+        }
+    }
+
+    fn app_search(&self, query: &str, scope: Scope) -> Result<Vec<AppSearchResult>, UiaError> {
+        let window = self.main_window()?;
+        self.run_search(&window, query, scope)?;
+        // Sections in order of first appearance; a section visited again replaces its earlier,
+        // shorter list.
+        let mut sections: Vec<(String, Vec<AppSearchResult>)> = Vec::new();
+        self.walk_sections(&window, |section, items| {
+            let mut found: Vec<AppSearchResult> = Vec::new();
+            for (index, item) in items.iter().enumerate().take(MAX_ITEMS_PER_SECTION) {
+                let parts = self.text_parts(item);
+                if let Some(result) = parse_result(section, index, &self.name_of(item), &parts) {
+                    found.push(result);
+                }
+            }
+            match sections.iter_mut().find(|(name, _)| name == section) {
+                Some((_, known)) => *known = found,
+                None => sections.push((section.to_owned(), found)),
+            }
+            false
+        });
+        Ok(sections.into_iter().flat_map(|(_, found)| found).collect())
+    }
+
+    /// Repeats the search, finds `title` at `section` and `index`, and starts it. Returns the kind
+    /// that was started. A song or album *page* reached this way is where playback is started.
+    fn app_search_play(
+        &self,
+        query: &str,
+        scope: Scope,
+        section: &str,
+        index: usize,
+        title: &str,
+    ) -> Result<Kind, UiaError> {
+        let window = self.main_window()?;
+        self.run_search(&window, query, scope)?;
+        let mut target: Option<(AppSearchResult, IUIAutomationElement)> = None;
+        self.walk_sections(&window, |name, items| {
+            if !same_text(name, section) {
+                return false;
+            }
+            if let Some(item) = items.get(index) {
+                let parts = self.text_parts(item);
+                if let Some(result) = parse_result(name, index, &self.name_of(item), &parts) {
+                    target = Some((result, item.clone()));
+                }
+            }
+            true
+        });
+        let (result, item) = target
+            .ok_or_else(|| UiaError::NotFound("The search no longer finds that result".into()))?;
+        if !same_text(&result.title, title) {
+            return Err(UiaError::NotFound(
+                "The search no longer finds that result".into(),
+            ));
+        }
+        if !can_play(scope, result.kind) {
+            return Err(UiaError::Failed(
+                "This kind of result cannot be started yet".into(),
+            ));
+        }
+        self.bring_into_view(&item);
+        match (scope, result.kind) {
+            // A library song row plays as soon as it is invoked.
+            (Scope::Library, Kind::Song) => self.invoke(&item, "the search result")?,
+            // A catalog album opens its page; the page's Play button starts it.
+            (Scope::Catalog, Kind::Album) => {
+                self.invoke(&item, "the search result")?;
+                self.press_page_play(&window)?;
+            }
+            // A catalog song opens its album or single page; play the song from there.
+            (Scope::Catalog, Kind::Song) => {
+                self.invoke(&item, "the search result")?;
+                wait_for(PAGE_WAIT, || self.find_by_id(&window, PLAY_BUTTON_ID)).ok_or_else(
+                    || UiaError::Failed("the song's page did not open in Apple Music".into()),
+                )?;
+                let has_rows = wait_for(Duration::from_secs(2), || {
+                    (!self.page_rows(&window).is_empty()).then_some(())
+                })
+                .is_some();
+                // An album page lists its songs (play the right row); a single's page has no list
+                // to choose from and its Play button plays the single.
+                if has_rows && self.page_rows(&window).len() >= 2 {
+                    self.play_song_row(&window, &result.title)?;
+                } else {
+                    self.press_page_play(&window)?;
+                }
+            }
+            _ => {
+                return Err(UiaError::Failed(
+                    "This kind of result cannot be started yet".into(),
+                ))
+            }
+        }
+        Ok(result.kind)
     }
 }
 
@@ -654,7 +1327,43 @@ enum Command {
         album: String,
         reply: Reply<Result<(), UiaError>>,
     },
+    Modes(Reply<Result<Modes, UiaError>>),
+    ModesIfVisible(Reply<Option<Modes>>),
+    SetModes {
+        shuffle: Option<bool>,
+        repeat: Option<Repeat>,
+        reply: Reply<Result<Modes, UiaError>>,
+    },
+    Queue(Reply<Result<Vec<QueueItem>, UiaError>>),
+    AppSearch {
+        query: String,
+        scope: Scope,
+        reply: Reply<Result<Vec<AppSearchResult>, UiaError>>,
+    },
+    AppSearchPlay {
+        query: String,
+        scope: Scope,
+        section: String,
+        index: usize,
+        title: String,
+        reply: Reply<Result<Kind, UiaError>>,
+    },
     Stop,
+}
+
+/// Waits for the UI thread's answer. An Apple Music that does not answer in time is a failed
+/// call (`500`, contract C-007), not a missing feature (`501`).
+async fn await_answer<T>(
+    limit: Duration,
+    answer: oneshot::Receiver<Result<T, UiaError>>,
+    stopped: impl FnOnce() -> MediaError,
+) -> Result<T, MediaError> {
+    match tokio::time::timeout(limit, answer).await {
+        Ok(answer) => answer.map_err(|_| stopped())?.map_err(MediaError::from),
+        Err(_) => Err(MediaError::Internal(
+            "Apple Music took too long to respond".into(),
+        )),
+    }
 }
 
 /// Handle to the UI thread.
@@ -689,12 +1398,7 @@ impl Uia {
         let stopped = || MediaError::Internal("the UI Automation thread is not running".into());
         let (reply, answer) = oneshot::channel();
         self.commands.send(build(reply)).map_err(|_| stopped())?;
-        match tokio::time::timeout(OP_TIMEOUT, answer).await {
-            Ok(answer) => answer.map_err(|_| stopped())?.map_err(MediaError::from),
-            Err(_) => Err(MediaError::NotSupported(
-                "Apple Music took too long to respond".into(),
-            )),
-        }
+        await_answer(OP_TIMEOUT, answer, stopped).await
     }
 
     pub async fn playlists(&self) -> Result<Vec<Playlist>, MediaError> {
@@ -717,6 +1421,70 @@ impl Uia {
             open_url,
             title,
             album,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn modes(&self) -> Result<Modes, MediaError> {
+        self.ask(Command::Modes).await
+    }
+
+    /// Never touches the window and never waits long: `None` if it cannot be read right now. A
+    /// request nobody waits for any more is skipped by the UI thread.
+    pub async fn modes_if_visible(&self) -> Option<Modes> {
+        let (reply, answer) = oneshot::channel();
+        self.commands.send(Command::ModesIfVisible(reply)).ok()?;
+        answer.await.ok().flatten()
+    }
+
+    pub async fn set_modes(
+        &self,
+        shuffle: Option<bool>,
+        repeat: Option<Repeat>,
+    ) -> Result<Modes, MediaError> {
+        self.ask(|reply| Command::SetModes {
+            shuffle,
+            repeat,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn queue(&self) -> Result<Vec<QueueItem>, MediaError> {
+        self.ask(Command::Queue).await
+    }
+
+    pub async fn app_search(
+        &self,
+        query: &str,
+        scope: Scope,
+    ) -> Result<Vec<AppSearchResult>, MediaError> {
+        let query = query.to_owned();
+        self.ask(|reply| Command::AppSearch {
+            query,
+            scope,
+            reply,
+        })
+        .await
+    }
+
+    /// Starts the result; returns the kind that was started.
+    pub async fn app_search_play(
+        &self,
+        query: &str,
+        scope: Scope,
+        section: &str,
+        index: usize,
+        title: &str,
+    ) -> Result<Kind, MediaError> {
+        let (query, section, title) = (query.to_owned(), section.to_owned(), title.to_owned());
+        self.ask(|reply| Command::AppSearchPlay {
+            query,
+            scope,
+            section,
+            index,
+            title,
             reply,
         })
         .await
@@ -796,9 +1564,82 @@ fn run(inbox: mpsc::Receiver<Command>, ready: mpsc::Sender<Result<(), String>>) 
                     let _ = reply.send(guarded(|| driver.play_track(&open_url, &title, &album)));
                 }
             }
+            Command::Modes(reply) => {
+                if !reply.is_closed() {
+                    let _ = reply.send(guarded(|| driver.modes()));
+                }
+            }
+            Command::ModesIfVisible(reply) => {
+                if !reply.is_closed() {
+                    let _ = reply.send(guarded(|| Ok(driver.modes_if_visible())).ok().flatten());
+                }
+            }
+            Command::SetModes {
+                shuffle,
+                repeat,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(guarded(|| driver.set_modes(shuffle, repeat)));
+                }
+            }
+            Command::Queue(reply) => {
+                if !reply.is_closed() {
+                    let _ = reply.send(guarded(|| driver.queue()));
+                }
+            }
+            Command::AppSearch {
+                query,
+                scope,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(guarded(|| driver.app_search(&query, scope)));
+                }
+            }
+            Command::AppSearchPlay {
+                query,
+                scope,
+                section,
+                index,
+                title,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(guarded(|| {
+                        driver.app_search_play(&query, scope, &section, index, &title)
+                    }));
+                }
+            }
         }
     }
     drop(driver);
     // SAFETY: balances the successful CoInitializeEx above.
     unsafe { CoUninitialize() };
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn no_answer_in_time_is_internal_not_unsupported() {
+        let (_reply, answer) = oneshot::channel::<Result<(), UiaError>>();
+        let result = await_answer(Duration::from_millis(20), answer, || {
+            MediaError::Internal("stopped".into())
+        })
+        .await;
+        assert!(matches!(result, Err(MediaError::Internal(m)) if m.contains("too long")));
+    }
+
+    #[tokio::test]
+    async fn an_answer_in_time_passes_through() {
+        let (reply, answer) = oneshot::channel::<Result<u8, UiaError>>();
+        let _ = reply.send(Ok(7));
+        let result = await_answer(Duration::from_secs(5), answer, || {
+            MediaError::Internal("stopped".into())
+        })
+        .await;
+        assert!(matches!(result, Ok(7)));
+    }
 }

@@ -1,5 +1,6 @@
 import 'package:freezed_annotation/freezed_annotation.dart';
 
+import 'modes.dart';
 import 'player_state.dart';
 import 'volume.dart';
 
@@ -41,6 +42,12 @@ class AppleMusicEvent extends WsEvent {
   final bool running;
 }
 
+/// Shuffle and repeat (MVP 4): sent on connect and when the agent sees a change.
+class ModesEvent extends WsEvent {
+  const ModesEvent(this.modes);
+  final Modes modes;
+}
+
 class PongEvent extends WsEvent {
   const PongEvent();
 }
@@ -58,6 +65,8 @@ WsEvent? parseWsEvent(WsMessage message) {
       case 'apple_music':
         final running = data?['running'];
         return running is bool ? AppleMusicEvent(running: running) : null;
+      case 'modes':
+        return data == null ? null : ModesEvent(Modes.fromJson(data));
       case 'pong':
         return const PongEvent();
     }

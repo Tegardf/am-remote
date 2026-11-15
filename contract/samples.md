@@ -235,6 +235,89 @@ Edited only from the root window via `/contract-change`.
 }
 ```
 
+## Modes, queue & app search (MVP 4)
+
+### modes_response
+```json
+{
+  "shuffle": true,
+  "repeat": "all"
+}
+```
+
+### modes_request
+```json
+{
+  "shuffle": false,
+  "repeat": "one"
+}
+```
+
+### queue_response
+```json
+{
+  "items": [
+    {
+      "index": 0,
+      "title": "Example Song",
+      "artist": "Example Artist",
+      "album": "Example Album",
+      "duration_ms": 215000,
+      "source": "queue"
+    },
+    {
+      "index": 1,
+      "title": "Another Song",
+      "artist": "Example Artist, Guest",
+      "album": "Another Album",
+      "duration_ms": 189000,
+      "source": "autoplay"
+    }
+  ]
+}
+```
+
+### queue_play_request
+```json
+{
+  "index": 1,
+  "title": "Another Song"
+}
+```
+
+### app_search_response
+```json
+{
+  "results": [
+    {
+      "section": "Songs",
+      "index": 0,
+      "kind": "song",
+      "title": "Example Song",
+      "subtitle": "Example Artist"
+    },
+    {
+      "section": "Albums",
+      "index": 0,
+      "kind": "album",
+      "title": "Example Album",
+      "subtitle": "Example Artist"
+    }
+  ]
+}
+```
+
+### app_search_play_request
+```json
+{
+  "q": "example song",
+  "scope": "library",
+  "section": "Songs",
+  "index": 0,
+  "title": "Example Song"
+}
+```
+
 ## WebSocket messages
 
 ### ws_state
@@ -271,6 +354,17 @@ Edited only from the root window via `/contract-change`.
   "type": "apple_music",
   "data": {
     "running": false
+  }
+}
+```
+
+### ws_modes
+```json
+{
+  "type": "modes",
+  "data": {
+    "shuffle": true,
+    "repeat": "off"
   }
 }
 ```

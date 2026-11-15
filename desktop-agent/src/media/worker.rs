@@ -16,15 +16,19 @@ use async_trait::async_trait;
 use tokio::sync::{broadcast, oneshot};
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 
+#[cfg(feature = "uia")]
+use super::appsearch::Kind;
 use super::audio::AppleMusicVolume;
 #[cfg(feature = "uia")]
-use super::library::playback_started;
+use super::library::{playback_started, same_text};
+#[cfg(feature = "uia")]
+use super::queue::QueueSource;
 use super::smtc::{Notify, SeekOutcome, Smtc};
 use super::state::{unix_now_ms, Artwork, MediaEvent, PlayerState};
 use super::tracker::{Observation, Tracker};
 use super::{
-    MediaBackend, MediaError, PlayTrack, Playlist, Transport, VolumeState, EVENT_BUFFER,
-    UIA_UNAVAILABLE,
+    AppSearchResult, MediaBackend, MediaError, Modes, PlayTrack, Playlist, QueueItem, Repeat,
+    Scope, Transport, VolumeState, EVENT_BUFFER, UIA_UNAVAILABLE,
 };
 
 type Reply<T> = oneshot::Sender<T>;
@@ -35,6 +39,17 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long to wait, after the UI was driven, for Apple Music to actually start playing.
 #[cfg(feature = "uia")]
 const START_WAIT: Duration = Duration::from_secs(6);
+
+/// Pause between the SMTC `Next` presses that jump to a queue row (100 and 300 ms both landed
+/// right in the spike).
+// verified: spike mvp4, 2026-11-14
+#[cfg(feature = "uia")]
+const QUEUE_SKIP_GAP: Duration = Duration::from_millis(150);
+
+/// How long after the last skip the target song may take to become current.
+// verified: spike mvp4, 2026-11-14 (0.8-1.3 s)
+#[cfg(feature = "uia")]
+const QUEUE_LAND_WAIT: Duration = Duration::from_secs(5);
 
 /// How long dropping the backend waits for the media thread to wind down.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
@@ -252,6 +267,121 @@ impl MediaBackend for WindowsBackend {
                 .await;
         }
         let _ = track;
+        Err(MediaError::NotSupported(UIA_UNAVAILABLE.into()))
+    }
+
+    async fn modes(&self) -> Result<Modes, MediaError> {
+        #[cfg(feature = "uia")]
+        if let Some(uia) = &self.uia {
+            return uia.modes().await;
+        }
+        Err(MediaError::NotSupported(UIA_UNAVAILABLE.into()))
+    }
+
+    async fn modes_if_visible(&self) -> Option<Modes> {
+        #[cfg(feature = "uia")]
+        if let Some(uia) = &self.uia {
+            return uia.modes_if_visible().await;
+        }
+        None
+    }
+
+    async fn set_modes(
+        &self,
+        shuffle: Option<bool>,
+        repeat: Option<Repeat>,
+    ) -> Result<Modes, MediaError> {
+        #[cfg(feature = "uia")]
+        if let Some(uia) = &self.uia {
+            return uia.set_modes(shuffle, repeat).await;
+        }
+        let _ = (shuffle, repeat);
+        Err(MediaError::NotSupported(UIA_UNAVAILABLE.into()))
+    }
+
+    async fn queue(&self) -> Result<Vec<QueueItem>, MediaError> {
+        #[cfg(feature = "uia")]
+        if let Some(uia) = &self.uia {
+            return uia.queue().await;
+        }
+        Err(MediaError::NotSupported(UIA_UNAVAILABLE.into()))
+    }
+
+    async fn queue_play(&self, index: usize, title: &str) -> Result<(), MediaError> {
+        #[cfg(feature = "uia")]
+        if let Some(uia) = &self.uia {
+            // Look again right now: the title at `index` must still be the one the client saw.
+            let rows = uia.queue().await?;
+            let row = rows.get(index).ok_or_else(|| {
+                MediaError::NotFound("There is no queue row at this index".into())
+            })?;
+            if !same_text(&row.title, title) {
+                return Err(MediaError::NotFound(
+                    "The queue has changed: that row is not this song any more".into(),
+                ));
+            }
+            // Row `index` is `index + 1` skips away. The songs in between start for a moment.
+            for _ in 0..=index {
+                self.transport(Transport::Next).await?;
+                tokio::time::sleep(QUEUE_SKIP_GAP).await;
+            }
+            let deadline = tokio::time::Instant::now() + QUEUE_LAND_WAIT;
+            loop {
+                if same_text(&self.state().await.title, &row.title) {
+                    return Ok(());
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(match row.source {
+                        QueueSource::Queue => MediaError::Internal(
+                            "a different song is playing after skipping".into(),
+                        ),
+                        // Skipping through the end of the queue into the suggestions may not land.
+                        QueueSource::Autoplay => MediaError::NotSupported(
+                            "Skipping into the autoplay songs did not reach this song".into(),
+                        ),
+                    });
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+        let _ = (index, title);
+        Err(MediaError::NotSupported(UIA_UNAVAILABLE.into()))
+    }
+
+    async fn app_search(
+        &self,
+        query: &str,
+        scope: Scope,
+    ) -> Result<Vec<AppSearchResult>, MediaError> {
+        #[cfg(feature = "uia")]
+        if let Some(uia) = &self.uia {
+            return uia.app_search(query, scope).await;
+        }
+        let _ = (query, scope);
+        Err(MediaError::NotSupported(UIA_UNAVAILABLE.into()))
+    }
+
+    async fn app_search_play(
+        &self,
+        query: &str,
+        scope: Scope,
+        section: &str,
+        index: usize,
+        title: &str,
+    ) -> Result<(), MediaError> {
+        #[cfg(feature = "uia")]
+        if let Some(uia) = &self.uia {
+            let before = self.state().await;
+            let kind = uia
+                .app_search_play(query, scope, section, index, title)
+                .await?;
+            // A song starts under its own title; an album starts with whatever its first track is.
+            let expected = (kind == Kind::Song).then_some(title);
+            return self
+                .wait_until_started(&before, expected, "the search result")
+                .await;
+        }
+        let _ = (query, scope, section, index, title);
         Err(MediaError::NotSupported(UIA_UNAVAILABLE.into()))
     }
 }

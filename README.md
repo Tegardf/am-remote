@@ -1,4 +1,28 @@
-# am-remote
+<div align="center">
+  <img src="android-controller/music-controller-icon.svg" alt="AM-remote logo" width="160" height="160">
+
+  <br><br>
+
+  <img src="https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white" alt="Rust">
+  <img src="https://img.shields.io/badge/Tokio-1F1F1F?style=for-the-badge" alt="Tokio">
+  <img src="https://img.shields.io/badge/Axum-1F1F1F?style=for-the-badge" alt="Axum">
+  <img src="https://img.shields.io/badge/windows--rs-0078D4?style=for-the-badge" alt="windows-rs">
+  <img src="https://img.shields.io/badge/Windows-0078D4?style=for-the-badge&logo=windows11&logoColor=white" alt="Windows">
+  <br>
+  <img src="https://img.shields.io/badge/Flutter-02569B?style=for-the-badge&logo=flutter&logoColor=white" alt="Flutter">
+  <img src="https://img.shields.io/badge/Dart-0175C2?style=for-the-badge&logo=dart&logoColor=white" alt="Dart">
+  <img src="https://img.shields.io/badge/Riverpod-00B4D8?style=for-the-badge" alt="Riverpod">
+  <img src="https://img.shields.io/badge/Dio-0175C2?style=for-the-badge" alt="Dio">
+  <img src="https://img.shields.io/badge/Android-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android">
+  <br>
+  <img src="https://img.shields.io/badge/HTTP%20%2B%20WebSocket-555555?style=for-the-badge" alt="HTTP + WebSocket">
+  <img src="https://img.shields.io/badge/mDNS-555555?style=for-the-badge" alt="mDNS">
+  <img src="https://img.shields.io/badge/Apple%20Music-FA243C?style=for-the-badge&logo=applemusic&logoColor=white" alt="Apple Music">
+  <img src="https://img.shields.io/badge/Claude%20Code-D97757?style=for-the-badge&logo=anthropic&logoColor=white" alt="Claude Code">
+
+  <h1><b>AM-remote</b></h1>
+  <h3>(Apple Music Remote)</h3>
+</div>
 
 > **Disclaimer:** this is a fully vibe-coded project, made just for fun and to solve my own problem. It isn't polished, supported or reviewed for anyone else's use, and it comes with no guarantees. It isn't affiliated with Apple. Use it, fork it or learn from it at your own risk.
 
@@ -23,7 +47,9 @@ I wanted to skip, pause and change the volume of Apple Music on my laptop from t
 - Play, pause, next, previous, volume and mute.
 - Now playing: title, artist, album, artwork, progress and seek, updated live.
 - A media notification and lock-screen controls on the phone.
-- Browse your playlists and play one; search the catalog and play a song.
+- Browse your playlists and play one.
+- Shuffle and repeat; the Up Next queue on the player screen, tap a song to play it.
+- Search through the Apple Music app's own search (catalog or your library) and play a result.
 - The phone finds the laptop by itself (mDNS) and pairs with a 6-digit code shown in the laptop's tray menu.
 
 ## Parts
@@ -44,6 +70,7 @@ The API both sides follow is written in [`CLAUDE.md`](CLAUDE.md) ("API contract 
 | MVP 1 | Play, pause, next, previous, volume, mute | ✅ |
 | MVP 2 | Now playing, artwork, seek, live updates, media notification | ✅ |
 | MVP 3 | Playlists and search | ✅ |
+| MVP 4 | Shuffle/repeat, Up Next queue, search through the Apple Music app | ✅ agent · app in progress |
 
 "Built" means the code exists and its checks passed. How well it works on a real laptop and phone is covered by the manual smoke-test checklists in each project's `docs/smoke-tests/`.
 
@@ -71,10 +98,12 @@ flutter doctor        # Flutter and Android toolchain should be ✓
 2. Run the app on the phone (see [android-controller/README.md](android-controller/README.md)). The laptop shows up in the list, or enter its IP by hand.
 3. Type the pairing code. From now on the phone is paired until you revoke it from the tray menu.
 4. Open Apple Music on the laptop, play something, and control it from the phone.
+5. To have the agent start by itself whenever you log in, follow "Install: start automatically at login" in [desktop-agent/README.md](desktop-agent/README.md). It uses Task Scheduler, not a Windows service: a service can't reach Apple Music's window.
 
 ## Known limits
 - Windows' media session API (SMTC) exposes only the current track: no queue, no playlists, no volume. Volume comes from per-app Core Audio instead.
 - Playlists and playing a song need UI Automation of the Apple Music window, which is fragile and can break when Apple updates the app. When it fails, the agent answers `501 NOT_SUPPORTED` instead of crashing.
-- Playing a song or playlist visibly changes Apple Music's window, because it's done through the app's own UI.
+- Playing a song or playlist, reading the queue, and searching visibly change Apple Music's window, because it's done through the app's own UI.
+- The queue shows only about the next 20 songs (that's all Apple Music exposes), and tapping a queue song skips through the ones before it. Search results from the app have no artwork.
 - It's meant for a trusted home network only: traffic is plain HTTP, and the pairing token is the only protection.
 - Out of scope: hooking or injecting into Apple Music, touching DRM, or imitating Apple's private server API.

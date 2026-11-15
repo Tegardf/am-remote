@@ -26,7 +26,10 @@ then `contract/samples.md` and `contract/CHANGELOG.md`. Each project then applie
 - **MVP 3 — Playlists & search:** list saved playlists, play a playlist, search the catalog, play a track.
   - Spike first: does opening a `music.apple.com` link play it in the desktop app? Decides link-based vs UI-Automation approach.
 
-Build MVP 0 → 1 → 2 first (stable Windows APIs). Run the spikes before committing to MVP 3.
+- **MVP 4 — Queue, shuffle/repeat & app search:** shuffle and repeat buttons; a scrollable Up Next queue under the player controls, tap a row to play it; search goes through the Apple Music app's own search and its results go back to the phone (replaces the iTunes Search API flow).
+  - Spike done (`desktop-agent/docs/spikes/mvp4.md`); contract C-006 written from it. Next: `mvp-4.md` task for each project, then `/build-mvp 4`.
+
+Build MVP 0 → 1 → 2 first (stable Windows APIs). Run the spikes before committing to MVP 3 and MVP 4.
 
 ## Known platform limits (don't try to "fix" these the hard way)
 - SMTC (Windows media session API) gives play/pause/skip/seek + metadata of the current track only. No queue, no playlists, no volume.
@@ -60,8 +63,14 @@ The agent re-publishes `ip` whenever its LAN IPv4 address changes (DHCP renewal,
 | POST | `/player/seek` | `{ position_ms }` | `204` | 2 |
 | GET | `/playlists` | – | `[ { id, name } ]` | 3 |
 | POST | `/play/playlist` | `{ id }` | `204` | 3 |
-| GET | `/search` | `?q=&limit=25` | `[ SearchResult ]` | 3 |
-| POST | `/play/track` | `{ url }` | `204` | 3 |
+| GET | `/search` | `?q=&limit=25` | `[ SearchResult ]` (legacy, see "Legacy iTunes flow") | 3 |
+| POST | `/play/track` | `{ url }` | `204` (legacy, see "Legacy iTunes flow") | 3 |
+| GET | `/player/modes` | – | `Modes` | 4 |
+| POST | `/player/modes` | `{ shuffle?, repeat? }` | `Modes` | 4 |
+| GET | `/queue` | – | `{ items: [ QueueItem ] }` | 4 |
+| POST | `/queue/play` | `{ index, title }` | `204` | 4 |
+| GET | `/app-search` | `?q=&scope=catalog` | `{ results: [ AppSearchResult ] }` | 4 |
+| POST | `/app-search/play` | `{ q, scope, section, index, title }` | `204` | 4 |
 
 ```jsonc
 // PlayerState
@@ -74,6 +83,19 @@ The agent re-publishes `ip` whenever its LAN IPv4 address changes (DHCP renewal,
 // SearchResult
 { "id": "…", "title": "…", "artist": "…", "album": "…",
   "artwork_url": "https://…", "url": "https://music.apple.com/…" }
+
+// Modes (MVP 4)
+{ "shuffle": false, "repeat": "off" }     // repeat: "off" | "all" | "one"
+
+// QueueItem (MVP 4). The current song is not in the list; it is in PlayerState.
+{ "index": 0, "title": "…", "artist": "…", "album": "…",
+  "duration_ms": 215000,                  // 0 if the app shows none
+  "source": "queue" }                     // "queue" (Playing Next) | "autoplay"
+
+// AppSearchResult (MVP 4). No link, id or artwork exists for these.
+{ "section": "Songs", "index": 0,         // the section heading as the app shows it, and the position inside it
+  "kind": "song",                         // song | album | artist | playlist | video | other
+  "title": "…", "subtitle": "…" }         // subtitle: artist or curator, "" if none
 ```
 
 ### WebSocket `GET /ws?token=…`
@@ -81,6 +103,7 @@ Server → client messages: `{ "type": "<event>", "data": { … } }`
 - `state` → `PlayerState` (sent on connect and when something changes; see "Behaviour notes")
 - `volume` → `{ level, muted }`
 - `apple_music` → `{ running: bool }`
+- `modes` → `Modes` (MVP 4; sent on connect after `volume`, and when the agent sees a change)
 Client → server: `{ "type": "ping" }` every 15 s; server replies `{ "type": "pong" }`.
 
 ### Errors
@@ -99,8 +122,14 @@ Codes: `UNAUTHORIZED` (401), `BAD_PAIRING_CODE` (403), `BAD_REQUEST` (400), `NOT
 - `GET /search`: `q` is trimmed, 2–200 characters. `limit` defaults to 25 and must be 1–50, otherwise `400` (not clamped). Songs only, in catalog order, no paging. A space in `q` may be sent as `+` or `%20`. No internet on the laptop: `500 INTERNAL`.
 - `POST /play/track`: `url` must be an `https://music.apple.com/…` song link containing `?i=<id>`, otherwise `400`. `409` if Apple Music is closed, `404` if the catalog does not know the song, `501` if Apple Music's window cannot be driven.
 - `POST /play/playlist`: unknown `id` is `404`, `409` if Apple Music is closed, `501` if playlists cannot be read.
-- **Order of checks:** `401` (auth) → `400` (malformed or invalid input) → `409`/`501` (Apple Music state) → `404` (lookup). A bad request therefore answers `400` even if Apple Music is not running. The one exception is the upper limit of `position_ms` on `/player/seek`, which needs the current duration and is checked after the `409`. `POST /play/track` is a second exception: it first looks the song up in the catalog (it needs the title), so `404` (unknown song) and `500` (laptop offline) can come before `409`. `POST /play/playlist` follows the normal order. `501 NOT_SUPPORTED` (UI Automation unavailable) is answered before `409`.
-- A request with no JSON body at all, or the wrong content type, on `POST /volume`, `/player/seek`, `/play/track`, `/play/playlist` or `/pair` answers `400`. An empty or blank `id` on `/play/playlist` is `400`, not `404`.
+- `POST /player/modes`: both fields are optional and `{}` returns the current state. `shuffle` must be a boolean and `repeat` one of `"off"`, `"all"`, `"one"`, an explicit `null` counting as not given; otherwise `400`. The answer is the state read back from Apple Music after the change. `409` if Apple Music is closed, `501` if its shuffle or repeat buttons cannot be found, `500` if the state did not change.
+- `GET /queue`: `409` if Apple Music is closed, `501` if the queue cannot be read.
+- `POST /queue/play`: `index` is an integer of 0 or more and `title` a string that is non-empty after trimming, otherwise `400`. The agent matches on the trimmed title. `404` if there is no row at `index` or its title no longer matches (the queue moved on), `500` if a different song is current after the skips, `501` if the queue cannot be read, or for an `autoplay` row when the agent cannot play those, `409` if Apple Music is closed.
+- `GET /app-search`: `q` is trimmed, 2–200 characters. `scope` is `catalog` (default) or `library`, otherwise `400`. No match is `200` with an empty list. `409` if there is no Apple Music window, `501` if its search cannot be driven, `500` if the app did not answer in time.
+- `POST /app-search/play`: `q` (2–200 after trimming), `scope`, `section` and `title` (strings, non-empty after trimming) and `index` (integer 0 or more) are all required, otherwise `400`. The agent trims `section` and `title` and matches on the trimmed text. `404` if the search no longer finds that `title` at that `section` and `index`. `501` for a `kind` the agent cannot start yet (see "App search"), `409` if there is no Apple Music window.
+- **Timeouts on the MVP 4 endpoints** (`/player/modes`, `/queue`, `/queue/play`, `/app-search`, `/app-search/play`): if Apple Music does not answer in time, the answer is `500 INTERNAL`, never `501`. `501` means the needed element cannot be found at all.
+- **Order of checks:** `401` (auth) → `400` (malformed or invalid input) → `409`/`501` (Apple Music state) → `404` (lookup). A bad request therefore answers `400` even if Apple Music is not running. The one exception is the upper limit of `position_ms` on `/player/seek`, which needs the current duration and is checked after the `409`. `POST /play/track` is a second exception: it first looks the song up in the catalog (it needs the title), so `404` (unknown song) and `500` (laptop offline) can come before `409`. `POST /play/playlist` and the MVP 4 endpoints follow the normal order. `501 NOT_SUPPORTED` (UI Automation unavailable) is answered before `409`.
+- A request with no JSON body at all, or the wrong content type, on `POST /volume`, `/player/seek`, `/play/track`, `/play/playlist` or `/pair` answers `400`. An empty or blank `id` on `/play/playlist` is `400`, not `404`. The same applies to the MVP 4 `POST` endpoints (`/player/modes`, `/queue/play`, `/app-search/play`).
 
 ### Behaviour notes
 **Pairing**
@@ -131,13 +160,13 @@ Codes: `UNAUTHORIZED` (401), `BAD_PAIRING_CODE` (403), `BAD_REQUEST` (400), `NOT
 - `artwork_rev` increases on every track change, when a cover of the same track appears late, and when Apple Music quits. It never changes for pause, resume, seek or volume.
 
 **WebSocket**
-- On connect the agent sends `state`, then `apple_music`, then `volume` (only when there is an audio session).
+- On connect the agent sends `state`, then `apple_music`, then `volume` (only when there is an audio session), then `modes` (only when Apple Music is running and its shuffle and repeat buttons can be read).
 - `state` is pushed on connect, and when `status`, `title`, `artist`, `album`, `duration_ms` or `artwork_rev` change, or when the position jumps by more than 2 s from what was expected (a seek or a skip, which also covers `POST /player/seek`). It is not sent every second: clients advance the position themselves while `status` is `playing`.
 - A client silent for 45 s is disconnected, so keep the 15 s ping. Unknown client messages are ignored.
 - A `GET /ws` without WebSocket upgrade headers answers `400 BAD_REQUEST`.
 - A bad token on the handshake answers an HTTP `401` JSON body. Clients cannot read that status reliably, so they confirm with `GET /status`.
 - A revoked token closes that device's socket at once.
-- After a slow client lags behind, the agent resends `apple_music`, `state` and `volume`.
+- After a slow client lags behind, the agent resends `apple_music`, `state`, `volume` and `modes`.
 
 **Search and playing**
 - `artwork_url` is an https image link. A client may load it directly over HTTPS, without a token or other headers.
@@ -146,3 +175,16 @@ Codes: `UNAUTHORIZED` (401), `BAD_PAIRING_CODE` (403), `BAD_REQUEST` (400), `NOT
 - They drive Apple Music's own window, so Apple Music visibly changes: its window goes to the song or playlist and the play queue changes. Nothing is typed or clicked with the mouse or keyboard.
 - `/play/track`, `/playlists` and `/play/playlist` also work when Apple Music is open but nothing has played yet. They answer `409` only if there is no Apple Music window at all.
 - A playlist `id` is an opaque string (Apple Music's own persistent id). `GET /playlists` lists the playlists the sidebar shows, not folders. Ids are not yet verified across an Apple Music restart, so clients refetch the list after a reconnect.
+
+**Legacy iTunes flow (since C-006)**
+- `GET /search` and `POST /play/track` (the iTunes Search API route) are legacy. They keep working unchanged in v1, but new clients use `/app-search`. They can only be removed together with a v2.
+
+**Shuffle, repeat, queue and app search (MVP 4)**
+- Apple Music gives no event for shuffle or repeat. The agent re-reads the two buttons about every 2 s while a client is connected and pushes `modes` on a change, so a change made on the laptop reaches the phone after a short delay. Shuffle also reorders the queue, so a client re-reads `GET /queue` after a modes change.
+- `GET /queue` lists only what Apple Music shows: at most about the next 20 rows, `queue` rows first, then `autoplay` rows. It is not the whole queue. There is no stable row id, so a row is identified by `index` plus `title`. There is no `queue` event yet: a client re-reads `GET /queue` when `state` changes, after a modes change, and on request. The agent opens Apple Music's queue pane if it is closed and leaves it open.
+- `POST /queue/play` skips forward `index + 1` times, so the songs in between play for a moment. It answers `204` once the target song is current (about 1–1.5 s).
+- `GET /app-search` and `POST /app-search/play` drive Apple Music's own search box. The text is set through UI Automation, nothing is typed. A search takes about 4 s and a play 1–5 s, so clients wait at least 45 s. The window moves to the search and result pages and is not moved back.
+- App-search results have no link, id or artwork. `section` is the heading the app shows (for example `Songs`, `Albums`, `Top Results`), `index` the position inside it. Play repeats the search and finds the item again by `section`, `index` and `title`. First version: library songs, catalog songs and catalog albums play; other kinds answer `501`. `scope=library` finds the user's own music.
+- Calls that drive the Apple Music window run one after another. A second call waits for the first.
+- The `modes` event is not guaranteed to follow every situation: it is skipped when the buttons cannot be read in time (about 1.5 s), and nothing is sent when Apple Music comes back with the same values. A client reads `GET /player/modes` on start, when `apple_music` becomes true, and after a reconnect, and does not wait for the event.
+- A client treats an unknown `repeat` as `off` and an unknown `source` as `queue`, shows an unknown `kind` as given, and ignores unknown fields.

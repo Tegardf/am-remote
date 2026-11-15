@@ -4,6 +4,7 @@
 //! goes through [`ApiError`] and has the body `{ "error": { "code", "message" } }`.
 
 pub mod library;
+pub mod mvp4;
 pub mod pair;
 pub mod player;
 pub mod volume;
@@ -228,8 +229,15 @@ where
     type Rejection = ApiError;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        match Json::<T>::from_request(req, state).await {
-            Ok(Json(value)) => Ok(Self(value)),
+        // Every body of this API is a JSON object. serde would also read a struct from a JSON
+        // array (by position), so the shape is checked first.
+        match Json::<serde_json::Value>::from_request(req, state).await {
+            Ok(Json(value)) if !value.is_object() => {
+                Err(ApiError::bad_request("the body must be a JSON object"))
+            }
+            Ok(Json(value)) => serde_json::from_value::<T>(value)
+                .map(Self)
+                .map_err(|e| ApiError::bad_request(format!("Invalid request body: {e}"))),
             Err(rejection @ JsonRejection::MissingJsonContentType(_)) => {
                 Err(ApiError::bad_request(format!(
                     "{} (send Content-Type: application/json)",
@@ -249,6 +257,9 @@ pub struct AppState {
     pub search: Arc<dyn SearchBackend>,
     /// How long a WebSocket may stay silent before it is closed (tests shorten it).
     pub ws_idle_timeout: std::time::Duration,
+    /// How often a connected WebSocket looks at shuffle and repeat (Apple Music gives no event for
+    /// them; tests shorten it).
+    pub ws_modes_poll: std::time::Duration,
     pairing: Arc<Mutex<PairingState>>,
 }
 
@@ -265,6 +276,7 @@ impl AppState {
             media,
             search,
             ws_idle_timeout: ws::IDLE_TIMEOUT,
+            ws_modes_poll: ws::MODES_POLL,
             pairing: Arc::new(Mutex::new(PairingState::new(code))),
         })
     }
@@ -304,6 +316,11 @@ fn build_router(state: AppState, extra: Router<AppState>) -> Router {
         .route("/playlists", get(library::playlists))
         .route("/play/playlist", post(library::play_playlist))
         .route("/play/track", post(library::play_track))
+        .route("/player/modes", get(mvp4::get_modes).post(mvp4::set_modes))
+        .route("/queue", get(mvp4::get_queue))
+        .route("/queue/play", post(mvp4::play_queue_row))
+        .route("/app-search", get(mvp4::app_search))
+        .route("/app-search/play", post(mvp4::app_search_play))
         .merge(extra)
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed);

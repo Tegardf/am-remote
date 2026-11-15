@@ -1,6 +1,6 @@
 [package]
 name = "am-remote-agent"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
@@ -30,7 +30,8 @@ http-body-util = "0.1.5"
 tempfile = "3.27.0"
 tokio-tungstenite = "0.30.0"
 tower = { version = "0.5.3", features = ["util"] }
-windows = { version = "0.62.2", features = ["Win32_Media_Audio_Endpoints", "Win32_UI_Input_KeyboardAndMouse"] }
+windows-core = "0.62.2"
+windows = { version = "0.62.2", features = ["Media", "Win32_Media_Audio_Endpoints", "Win32_UI_Input_KeyboardAndMouse"] }
 
 [features]
 # UI Automation of the Apple Music window: library playlists and playing a song or playlist.

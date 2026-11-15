@@ -3,9 +3,12 @@
 //! `WindowsBackend` (SMTC + Core Audio on one dedicated thread) is the real implementation.
 //! `FakeBackend` is the test double: tests never need Apple Music, a window or the tray.
 
+pub mod appsearch;
 pub mod audio;
 pub mod library;
 pub mod links;
+pub mod modes;
+pub mod queue;
 pub mod smtc;
 pub mod state;
 pub mod tracker;
@@ -20,8 +23,11 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use tokio::sync::broadcast;
 
+pub use appsearch::{AppSearchResult, Scope};
 pub use audio::VolumeState;
 pub use library::Playlist;
+pub use modes::{Modes, Repeat};
+pub use queue::QueueItem;
 pub use state::{Artwork, MediaEvent, PlaybackStatus, PlayerState};
 pub use worker::WindowsBackend;
 
@@ -127,6 +133,48 @@ pub trait MediaBackend: Send + Sync {
 
     /// Opens the song's page and plays exactly that song.
     async fn play_track(&self, track: PlayTrack) -> Result<(), MediaError>;
+
+    /// Shuffle and repeat as the transport bar shows them (contract C-006). May bring a minimized
+    /// window back. `NotSupported` when the buttons cannot be found or read.
+    async fn modes(&self) -> Result<Modes, MediaError>;
+
+    /// Like [`MediaBackend::modes`] but never touches the window: `None` unless the main window is
+    /// visible and both buttons can be read. Used for polling and the WebSocket burst.
+    async fn modes_if_visible(&self) -> Option<Modes>;
+
+    /// Sets whichever of shuffle and repeat is given and returns the state read back afterwards.
+    /// `Internal` if the app did not end up in the asked state.
+    async fn set_modes(
+        &self,
+        shuffle: Option<bool>,
+        repeat: Option<Repeat>,
+    ) -> Result<Modes, MediaError>;
+
+    /// What the queue pane shows: at most about 20 rows, `queue` rows first, then `autoplay`.
+    /// Opens the pane if it is closed and leaves it open.
+    async fn queue(&self) -> Result<Vec<QueueItem>, MediaError>;
+
+    /// Skips forward to row `index` after checking that its title is still `title`.
+    /// `NotFound` if the row moved or changed, `Internal` if another song ended up playing.
+    async fn queue_play(&self, index: usize, title: &str) -> Result<(), MediaError>;
+
+    /// Searches through Apple Music's own search box. An empty answer is `Ok(vec![])`.
+    async fn app_search(
+        &self,
+        query: &str,
+        scope: Scope,
+    ) -> Result<Vec<AppSearchResult>, MediaError>;
+
+    /// Repeats the search, finds `title` at `section` and `index` (`NotFound` if it is not there)
+    /// and plays it. `NotSupported` for a kind that cannot be started yet.
+    async fn app_search_play(
+        &self,
+        query: &str,
+        scope: Scope,
+        section: &str,
+        index: usize,
+        title: &str,
+    ) -> Result<(), MediaError>;
 }
 
 /// Used by the binary if the Windows backend cannot start. `/status` says not running, and media
@@ -201,6 +249,49 @@ impl MediaBackend for NullBackend {
     async fn play_track(&self, _track: PlayTrack) -> Result<(), MediaError> {
         Err(backend_failed())
     }
+
+    async fn modes(&self) -> Result<Modes, MediaError> {
+        Err(backend_failed())
+    }
+
+    async fn modes_if_visible(&self) -> Option<Modes> {
+        None
+    }
+
+    async fn set_modes(
+        &self,
+        _shuffle: Option<bool>,
+        _repeat: Option<Repeat>,
+    ) -> Result<Modes, MediaError> {
+        Err(backend_failed())
+    }
+
+    async fn queue(&self) -> Result<Vec<QueueItem>, MediaError> {
+        Err(backend_failed())
+    }
+
+    async fn queue_play(&self, _index: usize, _title: &str) -> Result<(), MediaError> {
+        Err(backend_failed())
+    }
+
+    async fn app_search(
+        &self,
+        _query: &str,
+        _scope: Scope,
+    ) -> Result<Vec<AppSearchResult>, MediaError> {
+        Err(backend_failed())
+    }
+
+    async fn app_search_play(
+        &self,
+        _query: &str,
+        _scope: Scope,
+        _section: &str,
+        _index: usize,
+        _title: &str,
+    ) -> Result<(), MediaError> {
+        Err(backend_failed())
+    }
 }
 
 /// Test double. Starts with Apple Music running, an audio session, volume 50 and not muted, and an
@@ -221,7 +312,25 @@ pub struct FakeBackend {
     uia_supported: AtomicBool,
     played_playlists: Mutex<Vec<String>>,
     played_tracks: Mutex<Vec<PlayTrack>>,
+    modes: Mutex<Modes>,
+    queue: Mutex<Vec<QueueItem>>,
+    queue_plays: Mutex<Vec<usize>>,
+    queue_lands_wrong: AtomicBool,
+    catalog_results: Mutex<Vec<AppSearchResult>>,
+    library_results: Mutex<Vec<AppSearchResult>>,
+    app_searches: Mutex<Vec<(String, Scope)>>,
+    app_plays: Mutex<Vec<AppPlay>>,
     events: broadcast::Sender<MediaEvent>,
+}
+
+/// One call of `app_search_play` the fake accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppPlay {
+    pub query: String,
+    pub scope: Scope,
+    pub section: String,
+    pub index: usize,
+    pub title: String,
 }
 
 impl Default for FakeBackend {
@@ -258,6 +367,17 @@ impl FakeBackend {
             uia_supported: AtomicBool::new(true),
             played_playlists: Mutex::new(Vec::new()),
             played_tracks: Mutex::new(Vec::new()),
+            modes: Mutex::new(Modes {
+                shuffle: false,
+                repeat: Repeat::Off,
+            }),
+            queue: Mutex::new(Vec::new()),
+            queue_plays: Mutex::new(Vec::new()),
+            queue_lands_wrong: AtomicBool::new(false),
+            catalog_results: Mutex::new(Vec::new()),
+            library_results: Mutex::new(Vec::new()),
+            app_searches: Mutex::new(Vec::new()),
+            app_plays: Mutex::new(Vec::new()),
             events: broadcast::channel(buffer).0,
         }
     }
@@ -318,6 +438,45 @@ impl FakeBackend {
     /// Every song started, oldest first.
     pub fn played_tracks(&self) -> Vec<PlayTrack> {
         lock(&self.played_tracks).clone()
+    }
+
+    /// Shuffle and repeat as the fake's buttons show them. Nothing is published: the real app gives
+    /// no event either, the WebSocket polls.
+    pub fn set_modes_state(&self, modes: Modes) {
+        *lock(&self.modes) = modes;
+    }
+
+    /// The rows the fake's queue pane shows.
+    pub fn set_queue(&self, items: Vec<QueueItem>) {
+        *lock(&self.queue) = items;
+    }
+
+    /// Makes the next skips end on a different song than asked for.
+    pub fn set_queue_lands_wrong(&self, wrong: bool) {
+        self.queue_lands_wrong.store(wrong, Ordering::SeqCst);
+    }
+
+    /// Indexes of every queue row played, oldest first.
+    pub fn queue_plays(&self) -> Vec<usize> {
+        lock(&self.queue_plays).clone()
+    }
+
+    /// What the fake's search answers for `scope`.
+    pub fn set_app_results(&self, scope: Scope, results: Vec<AppSearchResult>) {
+        match scope {
+            Scope::Catalog => *lock(&self.catalog_results) = results,
+            Scope::Library => *lock(&self.library_results) = results,
+        }
+    }
+
+    /// Every (query, scope) searched, oldest first.
+    pub fn app_searches(&self) -> Vec<(String, Scope)> {
+        lock(&self.app_searches).clone()
+    }
+
+    /// Every app-search result played, oldest first.
+    pub fn app_plays(&self) -> Vec<AppPlay> {
+        lock(&self.app_plays).clone()
     }
 
     /// Like the real backend: "not supported" is answered before "not running".
@@ -451,6 +610,104 @@ impl MediaBackend for FakeBackend {
     async fn play_track(&self, track: PlayTrack) -> Result<(), MediaError> {
         self.require_uia()?;
         lock(&self.played_tracks).push(track);
+        Ok(())
+    }
+
+    async fn modes(&self) -> Result<Modes, MediaError> {
+        self.require_uia()?;
+        Ok(*lock(&self.modes))
+    }
+
+    async fn modes_if_visible(&self) -> Option<Modes> {
+        self.require_uia().ok()?;
+        Some(*lock(&self.modes))
+    }
+
+    async fn set_modes(
+        &self,
+        shuffle: Option<bool>,
+        repeat: Option<Repeat>,
+    ) -> Result<Modes, MediaError> {
+        self.require_uia()?;
+        let mut modes = lock(&self.modes);
+        if let Some(shuffle) = shuffle {
+            modes.shuffle = shuffle;
+        }
+        if let Some(repeat) = repeat {
+            modes.repeat = repeat;
+        }
+        Ok(*modes)
+    }
+
+    async fn queue(&self) -> Result<Vec<QueueItem>, MediaError> {
+        self.require_uia()?;
+        let mut items = lock(&self.queue).clone();
+        items.truncate(queue::MAX_ROWS);
+        Ok(items)
+    }
+
+    async fn queue_play(&self, index: usize, title: &str) -> Result<(), MediaError> {
+        self.require_uia()?;
+        let items = lock(&self.queue).clone();
+        let row = items
+            .get(index)
+            .ok_or_else(|| MediaError::NotFound("There is no queue row at this index".into()))?;
+        if !library::same_text(&row.title, title) {
+            return Err(MediaError::NotFound(
+                "The queue has changed: that row is not this song any more".into(),
+            ));
+        }
+        if self.queue_lands_wrong.load(Ordering::SeqCst) {
+            return Err(MediaError::Internal(
+                "a different song is playing after skipping".into(),
+            ));
+        }
+        lock(&self.queue_plays).push(index);
+        Ok(())
+    }
+
+    async fn app_search(
+        &self,
+        query: &str,
+        scope: Scope,
+    ) -> Result<Vec<AppSearchResult>, MediaError> {
+        self.require_uia()?;
+        lock(&self.app_searches).push((query.to_owned(), scope));
+        Ok(match scope {
+            Scope::Catalog => lock(&self.catalog_results).clone(),
+            Scope::Library => lock(&self.library_results).clone(),
+        })
+    }
+
+    async fn app_search_play(
+        &self,
+        query: &str,
+        scope: Scope,
+        section: &str,
+        index: usize,
+        title: &str,
+    ) -> Result<(), MediaError> {
+        self.require_uia()?;
+        let results = self.app_search(query, scope).await?;
+        let found = results.iter().find(|r| {
+            r.section == section
+                && usize::try_from(r.index).is_ok_and(|i| i == index)
+                && library::same_text(&r.title, title)
+        });
+        let result = found
+            .ok_or_else(|| MediaError::NotFound("The search no longer finds that result".into()))?;
+        if !appsearch::can_play(scope, result.kind) {
+            return Err(MediaError::NotSupported(
+                "This kind of result cannot be started yet".into(),
+            ));
+        }
+        lock(&self.app_plays).push(AppPlay {
+            query: query.to_owned(),
+            scope,
+            section: section.to_owned(),
+            index,
+            title: title.to_owned(),
+        });
         Ok(())
     }
 }

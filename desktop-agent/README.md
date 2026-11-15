@@ -6,7 +6,7 @@ Windows background app (Rust) that controls the Apple Music app and serves the a
 - Conventions, structure and implementation notes: [CLAUDE.md](CLAUDE.md)
 - API contract (shared with the app): [../CLAUDE.md](../CLAUDE.md) and [../contract/](../contract/)
 
-> **Status:** MVP 0, 1, 2 and 3 are done. The roadmap is complete; MVP 3 passed its manual smoke test (`docs/smoke-tests/mvp-3.md`).
+> **Status:** MVP 0, 1, 2 and 3 are done. MVP 4 (shuffle/repeat, queue, search through the app) is written and its checks are green; waiting for the manual smoke test in `docs/smoke-tests/mvp-4.md`.
 
 ## What to install
 
@@ -40,6 +40,75 @@ New-NetFirewallRule -DisplayName "am-remote agent" -Direction Inbound -Protocol 
 ```
 Also set your Wi-Fi to Private: Settings → Network & internet → Wi-Fi → (your network) → Network profile type → **Private**.
 
+## Install: start automatically at login
+The agent runs as a normal background app in your own Windows session, started by Task Scheduler when you log in. It shows its tray icon and has no console window.
+
+> **Why not a Windows service?** A service runs in "session 0", away from your desktop. From there it cannot see Apple Music's window (UI Automation), your media session (SMTC) or the tray. It would start but control nothing. A logon task gives the same "always running in the background" result and works.
+
+Do these steps once in **PowerShell** (step 3 needs **Run as administrator**; open it from the Start menu with right-click → Run as administrator).
+
+**1. Build the release `.exe`** (in this folder):
+```powershell
+cargo build --release
+```
+
+**2. Copy it to a fixed place**, so a later `cargo build` doesn't fight a running copy:
+```powershell
+New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\am-remote" | Out-Null
+Copy-Item .\target\release\am-remote-agent.exe "$env:LOCALAPPDATA\am-remote\am-remote-agent.exe" -Force
+```
+
+**3. Register the logon task** (PowerShell as administrator, logged in as the same Windows user that uses Apple Music):
+```powershell
+$exe       = "$env:LOCALAPPDATA\am-remote\am-remote-agent.exe"
+$user      = "$env:USERDOMAIN\$env:USERNAME"
+$action    = New-ScheduledTaskAction -Execute $exe
+$trigger   = New-ScheduledTaskTrigger -AtLogOn -User $user
+$trigger.Delay = 'PT30S'   # wait 30 s after login, so Wi-Fi and the taskbar are ready
+$principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+$settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) `
+               -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
+               -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+               -MultipleInstances IgnoreNew -StartWhenAvailable
+Register-ScheduledTask -TaskName "am-remote agent" -Action $action -Trigger $trigger `
+  -Principal $principal -Settings $settings -Description "Apple Music remote agent (am-remote)"
+```
+What the settings do: `-ExecutionTimeLimit 0` stops Windows from killing it after the default 3 days; the restart settings retry up to 3 times if it fails; the battery settings keep it running on a laptop; `IgnoreNew` never starts a second copy.
+
+**4. Firewall:** add the Private-network rule from "Run" above, if you haven't yet.
+
+**5. Start it now** (no need to log out):
+```powershell
+Start-ScheduledTask -TaskName "am-remote agent"
+```
+Check: the am-remote icon is in the tray (maybe under the `^` overflow arrow), and `Get-ScheduledTaskInfo -TaskName "am-remote agent"` shows a recent `LastRunTime`. Then pair the phone with the code from the tray menu.
+
+**6. Test a real login:** sign out and back in (or restart). About 30 s after login the tray icon appears and the phone reconnects by itself.
+
+### Update to a new build
+```powershell
+cargo build --release
+Stop-ScheduledTask -TaskName "am-remote agent"
+Get-Process am-remote-agent -ErrorAction SilentlyContinue | Stop-Process
+Copy-Item .\target\release\am-remote-agent.exe "$env:LOCALAPPDATA\am-remote\am-remote-agent.exe" -Force
+Start-ScheduledTask -TaskName "am-remote agent"
+```
+Paired phones keep working: tokens live in `%APPDATA%\am-remote\config.json`, not next to the `.exe`.
+
+### Stop, disable or remove
+```powershell
+Stop-ScheduledTask    -TaskName "am-remote agent"   # stop until next login (also quit it from the tray)
+Disable-ScheduledTask -TaskName "am-remote agent"   # don't start at login any more
+Enable-ScheduledTask  -TaskName "am-remote agent"
+Unregister-ScheduledTask -TaskName "am-remote agent" -Confirm:$false   # remove completely (as administrator)
+```
+You can see and change the same task in the **Task Scheduler** app → Task Scheduler Library → `am-remote agent`.
+
+### Notes
+- Only one copy can run, because both would want port 8765. Quit the installed one (tray → Quit, or `Stop-ScheduledTask`) before `cargo run` during development.
+- The release build has no console, so it shows no logs. To see logs, stop the task and run `cargo run` in a terminal.
+- Windows sleep: the agent keeps running; the phone reconnects after the laptop wakes up.
+
 ## Try the API without the phone
 ```powershell
 $base = "http://localhost:8765/api/v1"
@@ -68,7 +137,7 @@ Open **this folder** (`desktop-agent/`) in its own VS Code window.
 
 | Command | What it does |
 |---|---|
-| `/build-mvp [0-3]` | follows `.claude/tasks/mvp-<n>.md`: plan → build in small steps → cargo checks → contract review (reviewer + skeptic subagents) → tick status, log contract requests, write `docs/smoke-tests/mvp-<n>.md` |
+| `/build-mvp [0-4]` | follows `.claude/tasks/mvp-<n>.md`: plan → build in small steps → cargo checks → contract review (reviewer + skeptic subagents) → tick status, log contract requests, write `docs/smoke-tests/mvp-<n>.md` |
 | `/verify` | fmt check, clippy, test, build, and a report |
 | `/sync-contract` | apply new `../contract/CHANGELOG.md` entries and `../contract/conformance-report.md` items |
 | `/spike link-playback` | follows `.claude/tasks/spike-link-playback.md`: can a `music.apple.com` link start playback? Decides the MVP 3 approach. Run before MVP 3; it will play music |
@@ -89,4 +158,6 @@ This window never changes the contract. Gaps go to `docs/contract-requests.md`, 
 | `cargo` not recognised after installing | Open a new terminal or VS Code window (PATH is read at start) |
 | Agent says Apple Music is not running | It must be the Microsoft Store **Apple Music** app (not iTunes), and it must be running |
 | Volume endpoints fail before anything has played | Windows only creates Apple Music's audio session after its first playback. They answer `409 NO_AUDIO_SESSION` (playback buttons still work). Play something once |
+| Installed agent doesn't start at login | Task Scheduler → `am-remote agent` → History / Last Run Result. Check the `.exe` path still exists, and that the task user is the one you log in with. Run `Start-ScheduledTask -TaskName "am-remote agent"` by hand |
+| `cargo run` says the port is in use | The installed agent is running. Quit it from the tray or run `Stop-ScheduledTask -TaskName "am-remote agent"` |
 | Phone can't find the laptop | Wi-Fi profile Private, firewall rule above, same network, no guest/AP isolation. Use manual IP in the app |

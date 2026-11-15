@@ -3,7 +3,10 @@ import 'dart:convert';
 import 'package:am_remote/core/api_client.dart';
 import 'package:am_remote/core/models/agent_status.dart';
 import 'package:am_remote/core/models/api_error_body.dart';
+import 'package:am_remote/core/models/app_search.dart';
+import 'package:am_remote/core/models/modes.dart';
 import 'package:am_remote/core/models/pair_request.dart';
+import 'package:am_remote/core/models/queue_item.dart';
 import 'package:am_remote/core/models/pair_response.dart';
 import 'package:am_remote/core/models/player_state.dart';
 import 'package:am_remote/core/models/playlist.dart';
@@ -25,7 +28,7 @@ void main() {
   final covered = <String>{};
 
   /// Samples this app deliberately has no type for, each with the reason.
-  /// (None today: the app models all 28.)
+  /// (None today: the app has a type for every sample.)
   const notModelled = <String, String>{};
 
   void roundTrip(
@@ -83,13 +86,14 @@ void main() {
     (m) => (m as SeekRequest).toJson(),
   );
   final wsKeys = samples.keys.where((k) => k.startsWith('ws_')).toList();
-  test('samples.md has the five ws_* samples', () {
+  test('samples.md has the six ws_* samples', () {
     expect(
       wsKeys,
       containsAll([
         'ws_state',
         'ws_volume',
         'ws_apple_music',
+        'ws_modes',
         'ws_ping',
         'ws_pong',
       ]),
@@ -135,6 +139,91 @@ void main() {
     PlayTrackRequest.fromJson,
     (m) => (m as PlayTrackRequest).toJson(),
   );
+
+  // MVP 4 (contract C-006). `ws_modes` is covered with the other ws_* samples.
+  roundTrip('modes_response', Modes.fromJson, (m) => (m as Modes).toJson());
+  roundTrip(
+    'modes_request',
+    ModesRequest.fromJson,
+    (m) => (m as ModesRequest).toJson(),
+  );
+  roundTrip(
+    'queue_response',
+    QueueResponse.fromJson,
+    (m) => (m as QueueResponse).toJson(),
+  );
+  roundTrip(
+    'queue_play_request',
+    QueuePlayRequest.fromJson,
+    (m) => (m as QueuePlayRequest).toJson(),
+  );
+  roundTrip(
+    'app_search_response',
+    AppSearchResponse.fromJson,
+    (m) => (m as AppSearchResponse).toJson(),
+  );
+  roundTrip(
+    'app_search_play_request',
+    AppSearchPlayRequest.fromJson,
+    (m) => (m as AppSearchPlayRequest).toJson(),
+  );
+
+  test('the MVP 4 samples say what the app reads from them', () {
+    Map<String, Object?> json(String key) =>
+        jsonDecode(samples[key]!) as Map<String, Object?>;
+
+    final modes = Modes.fromJson(json('modes_response'));
+    expect((modes.shuffle, modes.repeat), (true, RepeatSetting.all));
+
+    final queue = QueueResponse.fromJson(json('queue_response')).items;
+    expect(queue.map((i) => (i.index, i.isAutoplay)), [(0, false), (1, true)]);
+    expect(queue.first.durationMs, 215000);
+
+    final results = AppSearchResponse.fromJson(json('app_search_response'));
+    expect(results.results.map((r) => (r.section, r.index, r.kind)), [
+      ('Songs', 0, 'song'),
+      ('Albums', 0, 'album'),
+    ]);
+
+    final play = AppSearchPlayRequest.fromJson(json('app_search_play_request'));
+    expect(
+      (play.q, play.scope, play.section, play.index, play.title),
+      ('example song', 'library', 'Songs', 0, 'Example Song'),
+    );
+  });
+
+  test('an unknown repeat value becomes off; missing fields get defaults', () {
+    expect(
+      Modes.fromJson({'shuffle': true, 'repeat': 'sometimes'}).repeat,
+      RepeatSetting.off,
+    );
+    expect(Modes.fromJson({}), const Modes());
+    expect(Modes.fromJson({'repeat': null}).repeat, RepeatSetting.off);
+    // `ModesRequest` leaves out what it doesn't change.
+    expect(const ModesRequest(shuffle: true).toJson(), {'shuffle': true});
+    expect(const ModesRequest(repeat: RepeatSetting.one).toJson(), {
+      'repeat': 'one',
+    });
+  });
+
+  test('queue and search rows with missing optional fields still parse', () {
+    final item = QueueItem.fromJson({'index': 4, 'title': 'T'});
+    expect((item.artist, item.album, item.durationMs), ('', '', 0));
+    expect(item.source, 'queue');
+    expect(item.isAutoplay, isFalse);
+    // An unknown `source` is a plain queue row.
+    expect(
+      QueueItem.fromJson({'index': 0, 'title': 'T', 'source': 'x'}).isAutoplay,
+      isFalse,
+    );
+
+    final result = AppSearchResult.fromJson({
+      'section': 'Songs',
+      'index': 0,
+      'title': 'T',
+    });
+    expect((result.kind, result.subtitle), ('other', ''));
+  });
 
   test('a sparse search result (no artist, album or artwork) still parses', () {
     final result = SearchResult.fromJson({
@@ -182,6 +271,10 @@ void main() {
     expect(parse('ws_state'), isA<StateEvent>());
     expect(parse('ws_volume'), isA<VolumeEvent>());
     expect((parse('ws_apple_music') as AppleMusicEvent).running, isFalse);
+    final modes = (parse('ws_modes') as ModesEvent).modes;
+    expect((modes.shuffle, modes.repeat), (true, RepeatSetting.off));
+    // A `modes` frame without data, or with junk, is ignored.
+    expect(parseWsEvent(const WsMessage(type: 'modes')), isNull);
     expect(parse('ws_pong'), isA<PongEvent>());
     // ping is client → server only; the app has no event for it.
     expect(parse('ws_ping'), isNull);

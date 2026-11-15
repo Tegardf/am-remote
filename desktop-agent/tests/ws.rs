@@ -51,7 +51,7 @@ async fn next_json(client: &mut Client) -> Value {
 /// Reads the messages a client gets on connect when Apple Music runs with an audio session:
 /// `state`, `apple_music`, `volume` (contract C-002).
 async fn skip_connect_burst(client: &mut Client) {
-    for expected in ["state", "apple_music", "volume"] {
+    for expected in ["state", "apple_music", "volume", "modes"] {
         assert_eq!(next_json(client).await["type"], expected);
     }
 }
@@ -103,6 +103,10 @@ async fn connect_sends_state_then_apple_music_then_volume() {
         next_json(&mut client).await,
         json!({ "type": "volume", "data": { "level": 50, "muted": false } })
     );
+    assert_eq!(
+        next_json(&mut client).await,
+        json!({ "type": "modes", "data": { "shuffle": false, "repeat": "off" } })
+    );
     // Nothing else follows: the next message is the answer to our ping.
     send_text(&mut client, json!({ "type": "ping" })).await;
     assert_eq!(next_json(&mut client).await, json!({ "type": "pong" }));
@@ -139,6 +143,7 @@ async fn a_backend_change_produces_a_new_state() {
     assert_eq!(next_json(&mut client).await["data"]["title"], "First Song");
     next_json(&mut client).await; // apple_music
     next_json(&mut client).await; // volume
+    next_json(&mut client).await; // modes
 
     h.media.set_state(playing("Second Song", 2));
     let update = next_json(&mut client).await;
@@ -298,6 +303,58 @@ async fn a_client_that_lags_is_resynchronised_with_state_apple_music_and_volume(
         next_json(&mut client).await,
         json!({ "type": "volume", "data": { "level": 50, "muted": false } })
     );
+    assert_eq!(
+        next_json(&mut client).await["type"],
+        "modes",
+        "the modes are part of the catch-up"
+    );
+}
+
+/// Apple Music gives no event for shuffle or repeat: the socket looks at the buttons and pushes
+/// `modes` when they changed, and only then.
+#[tokio::test]
+async fn modes_are_pushed_when_they_change_and_not_otherwise() {
+    use am_remote_agent::media::{Modes, Repeat};
+    let h = harness_with_modes_poll(Duration::from_millis(40));
+    let token = paired_token(&h).await;
+    let addr = serve(&h).await;
+    let mut client = connect(addr, &token).await.unwrap();
+    skip_connect_burst(&mut client).await;
+
+    // Nothing changed: several polls pass and nothing is sent (the next message is our pong).
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    send_text(&mut client, json!({ "type": "ping" })).await;
+    assert_eq!(next_json(&mut client).await, json!({ "type": "pong" }));
+
+    // A change made "on the laptop" reaches the client within a few polls.
+    h.media.set_modes_state(Modes {
+        shuffle: true,
+        repeat: Repeat::All,
+    });
+    assert_eq!(
+        next_json(&mut client).await,
+        json!({ "type": "modes", "data": { "shuffle": true, "repeat": "all" } })
+    );
+    // ...once: the same state is not sent again.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    send_text(&mut client, json!({ "type": "ping" })).await;
+    assert_eq!(next_json(&mut client).await, json!({ "type": "pong" }));
+}
+
+/// A button that cannot be read (Apple Music closed, window hidden) says nothing.
+#[tokio::test]
+async fn no_modes_are_sent_while_the_buttons_cannot_be_read() {
+    let h = harness_with_modes_poll(Duration::from_millis(40));
+    let token = paired_token(&h).await;
+    h.media.set_running(false);
+    let addr = serve(&h).await;
+    let mut client = connect(addr, &token).await.unwrap();
+    assert_eq!(next_json(&mut client).await["type"], "state");
+    assert_eq!(next_json(&mut client).await["type"], "apple_music");
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    send_text(&mut client, json!({ "type": "ping" })).await;
+    assert_eq!(next_json(&mut client).await, json!({ "type": "pong" }));
 }
 
 #[tokio::test]

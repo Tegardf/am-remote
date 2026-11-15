@@ -11,6 +11,8 @@ None of them load at session start: the commands open them on demand.
 | 3b | [spike-uia-queue.md](spike-uia-queue.md) | `/spike uia-queue` | Optional; fills `playlist_name` |
 | 4 | [spike-link-playback.md](spike-link-playback.md) | `/spike link-playback` | **Required before MVP 3** |
 | 5 | [mvp-3.md](mvp-3.md) | `/build-mvp 3` | Playlists, search, play track |
+| 6 | [spike-mvp4.md](spike-mvp4.md) | `/spike mvp4` | **Required before MVP 4**: shuffle/repeat, queue, app search (done) |
+| 7 | [mvp-4.md](mvp-4.md) | `/build-mvp 4` | Modes, queue, app search (contract C-006) |
 
 Every task follows [_workflow-rules.md](_workflow-rules.md): plan → build → check → contract review → wrap-up.
 To add or change a task, use `/new-task` in the **root** window.

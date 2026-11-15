@@ -7,6 +7,9 @@ import 'package:dio/dio.dart';
 import 'agent_address.dart';
 import 'models/agent_status.dart';
 import 'models/api_error_body.dart';
+import 'models/app_search.dart';
+import 'models/modes.dart';
+import 'models/queue_item.dart';
 import 'models/pair_request.dart';
 import 'models/pair_response.dart';
 import 'models/player_state.dart';
@@ -111,10 +114,44 @@ abstract interface class ApiClient {
 
   /// `POST /play/track` with a result's `url`.
   Future<void> playTrack(String url);
+
+  // MVP 4. These drive Apple Music's window on the laptop, one call after the
+  // other, so every one of them may wait behind a slow one: they use the long
+  // timeout.
+
+  /// `GET /player/modes`.
+  Future<Modes> getModes();
+
+  /// `POST /player/modes`. Send [shuffle], [repeat], or both. The answer is
+  /// the state read back from Apple Music.
+  Future<Modes> setModes({bool? shuffle, RepeatSetting? repeat});
+
+  /// `GET /queue`: about the next 20 songs (not the current one).
+  Future<List<QueueItem>> getQueue();
+
+  /// `POST /queue/play`: a row is identified by [index] plus [title].
+  Future<void> playQueueItem(int index, String title);
+
+  /// `GET /app-search`: Apple Music's own search. Takes about 4 s.
+  Future<List<AppSearchResult>> appSearch(
+    String q, {
+    SearchScope scope = SearchScope.catalog,
+  });
+
+  /// `POST /app-search/play`: [q] and [scope] are those of the search that
+  /// found the result, the rest are the result's own fields.
+  Future<void> playAppResult({
+    required String q,
+    required SearchScope scope,
+    required String section,
+    required int index,
+    required String title,
+  });
 }
 
 /// How long to wait for calls where the agent drives Apple Music's window
-/// (playlists, playing a playlist or a song). The agent's worst case is about
+/// (playlists, playing a playlist or a song, and the MVP 4 calls: shuffle and
+/// repeat, the queue, app search). The agent's worst case is about
 /// 41 s (35 s of driving the window plus 6 s waiting for playback to start),
 /// and it asks clients for at least 45 s, or a slow success looks like a
 /// failure.
@@ -262,6 +299,79 @@ class DioApiClient implements ApiClient {
     'POST',
     '/play/track',
     body: PlayTrackRequest(url: url).toJson(),
+    receiveTimeout: uiOperationTimeout,
+  );
+
+  @override
+  Future<Modes> getModes() async {
+    final data = await request<Object?>(
+      'GET',
+      '/player/modes',
+      receiveTimeout: uiOperationTimeout,
+    );
+    return Modes.fromJson(_asJsonMap(data));
+  }
+
+  @override
+  Future<Modes> setModes({bool? shuffle, RepeatSetting? repeat}) async {
+    final data = await request<Object?>(
+      'POST',
+      '/player/modes',
+      body: ModesRequest(shuffle: shuffle, repeat: repeat).toJson(),
+      receiveTimeout: uiOperationTimeout,
+    );
+    return Modes.fromJson(_asJsonMap(data));
+  }
+
+  @override
+  Future<List<QueueItem>> getQueue() async {
+    final data = await request<Object?>(
+      'GET',
+      '/queue',
+      receiveTimeout: uiOperationTimeout,
+    );
+    return QueueResponse.fromJson(_asJsonMap(data)).items;
+  }
+
+  @override
+  Future<void> playQueueItem(int index, String title) => request<Object?>(
+    'POST',
+    '/queue/play',
+    body: QueuePlayRequest(index: index, title: title).toJson(),
+    receiveTimeout: uiOperationTimeout,
+  );
+
+  @override
+  Future<List<AppSearchResult>> appSearch(
+    String q, {
+    SearchScope scope = SearchScope.catalog,
+  }) async {
+    final data = await request<Object?>(
+      'GET',
+      '/app-search',
+      query: {'q': q, 'scope': scope.name},
+      receiveTimeout: uiOperationTimeout,
+    );
+    return AppSearchResponse.fromJson(_asJsonMap(data)).results;
+  }
+
+  @override
+  Future<void> playAppResult({
+    required String q,
+    required SearchScope scope,
+    required String section,
+    required int index,
+    required String title,
+  }) => request<Object?>(
+    'POST',
+    '/app-search/play',
+    body: AppSearchPlayRequest(
+      q: q,
+      scope: scope.name,
+      section: section,
+      index: index,
+      title: title,
+    ).toJson(),
     receiveTimeout: uiOperationTimeout,
   );
 

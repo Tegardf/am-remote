@@ -17,6 +17,27 @@ Newest entry first. Entry format:
 
 ---
 
+## C-007 · 2026-11-15 · MVP 4 clarifications (contract freeze for v0.2.0)
+- **Applies to:** agent (one small fix); app (marker only)
+- **Breaking:** no (clarifications of what the code already does; one rare status code is pinned: an Apple Music timeout on an MVP 4 endpoint is `500`, not `501`)
+- **Change:** Input rules: a timeout on any MVP 4 endpoint is `500 INTERNAL`, `501` only when the element is missing; `title` and `section` are non-empty after trimming and matched trimmed. Behaviour notes: the `modes` event is not guaranteed (skipped on a read timeout, not resent when Apple Music comes back unchanged), so clients read `GET /player/modes` on start, when `apple_music` becomes true, and after a reconnect; clients map an unknown `repeat` to `off`, an unknown `source` to `queue`, show an unknown `kind` as given, and ignore unknown fields.
+- **Resolves:** conformance report gaps "timeout code for window-driving calls", "unknown values on the client side", "blank and trimmed text" and "`modes` after Apple Music comes back"; conformance finding #1 (agent).
+- **Agent notes:** map the outer UI Automation timeout in `Uia::ask` (`src/media/uia.rs`, `OP_TIMEOUT`) to `MediaError::Internal` (`500`) instead of `NotSupported`, and add a test (this is conformance finding #1). Nothing else changes.
+- **App notes:** no contract change (the app already does all of this). Fix conformance finding #2 (count `q` with `.runes` for the 2-character minimum, plus a one-emoji test) and record the marker C-007.
+- **Freeze:** the v1 contract is frozen again until v0.2.0 is tagged; see `contract/RELEASE.md`.
+
+---
+
+## C-006 · 2026-11-15 · MVP 4: shuffle/repeat, queue, app search
+- **Applies to:** agent, app
+- **Breaking:** no (additive: new endpoints and one new WebSocket event; nothing existing changes)
+- **Change:** New endpoints `GET`/`POST /player/modes` (`Modes`: `shuffle` bool, `repeat` `off|all|one`), `GET /queue` (`QueueItem`, about the next 20 rows), `POST /queue/play` (`index` + `title`), `GET /app-search` (`q`, `scope=catalog|library`, `AppSearchResult`) and `POST /app-search/play`. New WebSocket event `modes` (on connect after `volume`, and on change). Input rules and behaviour notes for all of them. `GET /search` and `POST /play/track` are marked legacy; they stay in v1 and can only be removed with v2. Seven new samples: `modes_response`, `modes_request`, `queue_response`, `queue_play_request`, `app_search_response`, `app_search_play_request`, `ws_modes`.
+- **Resolves:** the MVP 4 request (shuffle and repeat buttons, scrollable queue with tap to play, search through the Apple Music app). Source: `desktop-agent/docs/spikes/mvp4.md`.
+- **Agent notes:** everything goes through UI Automation behind the `uia` feature (`501` without it or when an element is missing). Shuffle: `ShuffleButton` (Toggle). Repeat: `RepeatButton` (Invoke cycles off → all → one; read the state from its Name, at most 2 invokes). SMTC shuffle/repeat calls do nothing, do not use them. Queue: pane via `PlayQueueToggleButton`, rows in `PlayQueueListView` then `PlayQueueListViewAutoplay`; play a row with `index + 1` SMTC `Next` calls after re-checking the title. Search: `SetValue` on the sidebar search box, invoke the suggestion named exactly like the query, results by section; library song `Invoke` plays, catalog album/song `Invoke` then the page's Play button or row menu. Poll modes about every 2 s, re-read the queue on `StructureChanged` and `MediaPropertiesChanged`. Serialize window-driving calls. Verify autoplay-row skipping; answer `501` for it if it fails. Add the seven samples to the contract test.
+- **App notes:** shuffle and repeat buttons (state from `modes`); an Up Next list under the player buttons, scrollable, tap a row to call `POST /queue/play`, re-read `GET /queue` on `state` and `modes` changes; search screen uses `/app-search` (with a catalog/library switch) and `POST /app-search/play`, no artwork or link; stop using `/search` and `/play/track`; wait 45 s for the play calls. Add the seven samples to the contract test.
+
+---
+
 ## C-005 · 2026-11-14 · Final v1 clarifications (contract freeze)
 - **Applies to:** none (documentation only; it describes what the code already does)
 - **Breaking:** no

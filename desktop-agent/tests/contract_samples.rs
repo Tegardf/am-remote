@@ -10,12 +10,15 @@ use serde::Serialize;
 use serde_json::Value;
 
 use am_remote_agent::api::library::{PlayPlaylistRequest, PlayTrackRequest};
+use am_remote_agent::api::mvp4::{
+    AppSearchPlayRequest, AppSearchResponse, ModesRequest, QueuePlayRequest, QueueResponse,
+};
 use am_remote_agent::api::pair::{PairRequest, PairResponse};
 use am_remote_agent::api::player::SeekRequest;
 use am_remote_agent::api::volume::VolumeRequest;
 use am_remote_agent::api::ws::{ClientMessage, ServerMessage};
 use am_remote_agent::api::{ApiError, ErrorBody, StatusResponse};
-use am_remote_agent::media::{PlayerState, Playlist, VolumeState, UIA_UNAVAILABLE};
+use am_remote_agent::media::{Modes, PlayerState, Playlist, VolumeState, UIA_UNAVAILABLE};
 use am_remote_agent::search::SearchResult;
 
 const SAMPLES_MD: &str = include_str!("../../contract/samples.md");
@@ -64,7 +67,7 @@ const NOT_YET_MODELLED: [&str; 0] = [];
 
 /// Every sample key the tests below round-trip. A new sample in `contract/samples.md` that is in
 /// neither list fails `every_sample_is_covered`, so a new shape cannot be forgotten.
-const COVERED: [&str; 28] = [
+const COVERED: [&str; 35] = [
     "status_response",
     "pair_request",
     "pair_response",
@@ -93,6 +96,13 @@ const COVERED: [&str; 28] = [
     "error_not_found",
     "error_method_not_allowed",
     "error_no_audio_session",
+    "modes_response",
+    "modes_request",
+    "queue_response",
+    "queue_play_request",
+    "app_search_response",
+    "app_search_play_request",
+    "ws_modes",
 ];
 
 #[test]
@@ -146,8 +156,24 @@ fn library_samples() {
 }
 
 #[test]
+fn mvp4_samples() {
+    round_trip::<Modes>("modes_response");
+    round_trip::<ModesRequest>("modes_request");
+    round_trip::<QueueResponse>("queue_response");
+    round_trip::<QueuePlayRequest>("queue_play_request");
+    round_trip::<AppSearchResponse>("app_search_response");
+    round_trip::<AppSearchPlayRequest>("app_search_play_request");
+}
+
+#[test]
 fn websocket_samples() {
-    for key in ["ws_state", "ws_volume", "ws_apple_music", "ws_pong"] {
+    for key in [
+        "ws_state",
+        "ws_volume",
+        "ws_apple_music",
+        "ws_modes",
+        "ws_pong",
+    ] {
         round_trip::<ServerMessage>(key);
     }
     round_trip::<ClientMessage>("ws_ping");

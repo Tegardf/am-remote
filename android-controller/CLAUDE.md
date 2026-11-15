@@ -54,8 +54,9 @@ flutter analyze && flutter test
 ```
 
 ## Current status
-- Contract changes applied: C-005 (see ../contract/CHANGELOG.md; update via /sync-contract)
+- Contract changes applied: C-007 (see ../contract/CHANGELOG.md; update via /sync-contract)
 - [x] MVP 0 — connect screen, discovery, manual IP, pairing, connection indicator
 - [x] MVP 1 — play/pause/next/prev, volume slider, mute
 - [x] MVP 2 — now-playing card, artwork, progress/seek, media notification
 - [x] MVP 3 — playlists screen, search screen, bottom nav
+- [ ] MVP 4 — shuffle/repeat, Up Next list, app search (contract C-006)

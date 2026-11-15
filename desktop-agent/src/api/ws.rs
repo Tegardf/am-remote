@@ -17,10 +17,17 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::time::Instant;
 
 use super::{ApiError, AppState, AuthToken};
-use crate::media::{MediaEvent, PlayerState, VolumeState};
+use crate::media::{MediaEvent, Modes, PlayerState, VolumeState};
 
 /// A client that sends nothing for this long is gone (the app pings every 15 s).
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Apple Music gives no event for shuffle or repeat, so a connected client's socket looks at the
+/// two buttons this often (contract C-006: "about every 2 s").
+pub const MODES_POLL: Duration = Duration::from_secs(2);
+
+/// One look at the buttons must not hold the socket up when the UI thread is busy.
+const MODES_READ_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// A client that stops reading must not freeze its socket task (and with it the idle timeout and
 /// the revocation check): a send that takes this long ends the connection.
@@ -32,7 +39,11 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 pub enum ServerMessage {
     State(PlayerState),
     Volume(VolumeState),
-    AppleMusic { running: bool },
+    AppleMusic {
+        running: bool,
+    },
+    /// Shuffle and repeat (MVP 4).
+    Modes(Modes),
     Pong,
 }
 
@@ -99,7 +110,27 @@ async fn snapshot_messages(state: &AppState) -> Vec<ServerMessage> {
     if let Ok(volume) = state.media.volume().await {
         messages.push(ServerMessage::Volume(volume));
     }
+    if let Some(modes) = read_modes(state).await {
+        messages.push(ServerMessage::Modes(modes));
+    }
     messages
+}
+
+/// Shuffle and repeat, only if the window is visible and both buttons can be read right now
+/// (never brings a minimized window back, never waits long).
+async fn read_modes(state: &AppState) -> Option<Modes> {
+    tokio::time::timeout(MODES_READ_TIMEOUT, state.media.modes_if_visible())
+        .await
+        .ok()
+        .flatten()
+}
+
+/// The modes a catch-up burst carried, if it carried any.
+fn modes_in(messages: &[ServerMessage]) -> Option<Modes> {
+    messages.iter().find_map(|m| match m {
+        ServerMessage::Modes(modes) => Some(*modes),
+        _ => None,
+    })
 }
 
 /// Sends every message in order; false if the client is gone.
@@ -121,10 +152,15 @@ async fn run(mut socket: WebSocket, state: AppState, token: String) {
         hang_up(&mut socket).await;
         return;
     }
-    if !send_all(&mut socket, &snapshot_messages(&state).await).await {
+    let burst = snapshot_messages(&state).await;
+    let mut last_modes = modes_in(&burst);
+    if !send_all(&mut socket, &burst).await {
         return;
     }
 
+    let mut modes_poll = tokio::time::interval(state.ws_modes_poll);
+    modes_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    modes_poll.tick().await; // the first tick is immediate: the burst just covered it
     let idle_timeout = state.ws_idle_timeout;
     let idle = tokio::time::sleep(idle_timeout);
     tokio::pin!(idle);
@@ -138,11 +174,26 @@ async fn run(mut socket: WebSocket, state: AppState, token: String) {
                 }
                 Err(RecvError::Lagged(_)) => {
                     // Fell behind: skip the missed events and resend where things stand now.
-                    if !send_all(&mut socket, &snapshot_messages(&state).await).await {
+                    let burst = snapshot_messages(&state).await;
+                    if modes_in(&burst).is_some() {
+                        last_modes = modes_in(&burst);
+                    }
+                    if !send_all(&mut socket, &burst).await {
                         break;
                     }
                 }
                 Err(RecvError::Closed) => break,
+            },
+            _ = modes_poll.tick() => {
+                // A button that cannot be read right now (window hidden, UI busy) says nothing.
+                if let Some(modes) = read_modes(&state).await {
+                    if last_modes != Some(modes) {
+                        last_modes = Some(modes);
+                        if send(&mut socket, &ServerMessage::Modes(modes)).await.is_err() {
+                            break;
+                        }
+                    }
+                }
             },
             revocation = revoked.recv() => match revocation {
                 Err(RecvError::Closed) => break,
@@ -223,7 +274,23 @@ mod tests {
                     level: 50,
                     muted: false
                 }),
+                ServerMessage::Modes(Modes {
+                    shuffle: false,
+                    repeat: crate::media::Repeat::Off
+                }),
             ]
+        );
+    }
+
+    #[test]
+    fn modes_serialise_as_the_contract_event() {
+        let message = ServerMessage::Modes(Modes {
+            shuffle: true,
+            repeat: crate::media::Repeat::Off,
+        });
+        assert_eq!(
+            serde_json::to_value(message).unwrap(),
+            serde_json::json!({ "type": "modes", "data": { "shuffle": true, "repeat": "off" } })
         );
     }
 

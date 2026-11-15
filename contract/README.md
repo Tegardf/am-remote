@@ -37,6 +37,6 @@ Only from the root window, with `/contract-change <what>` (or `/contract-change 
 4. Then, in each project window, `/sync-contract` applies it to the code.
 
 ## Open questions
-None open. Everything raised so far is settled in C-001 to C-005 (see [CHANGELOG.md](CHANGELOG.md)).
+None open. Everything raised so far is settled in C-001 to C-007 (see [CHANGELOG.md](CHANGELOG.md)).
 
 When something in the contract turns out to be unclear, add it here (numbered) or log it in the project's `docs/contract-requests.md`, then settle it with `/contract-change`.

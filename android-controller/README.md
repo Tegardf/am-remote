@@ -61,7 +61,7 @@ Open **this folder** (`android-controller/`) in its own VS Code window.
 
 | Command | What it does |
 |---|---|
-| `/build-mvp [0-3]` | follows `.claude/tasks/mvp-<n>.md`: plan → build in small steps → flutter checks → contract review (reviewer + skeptic subagents) → tick status, log contract requests, write `docs/smoke-tests/mvp-<n>.md` |
+| `/build-mvp [0-4]` | follows `.claude/tasks/mvp-<n>.md`: plan → build in small steps → flutter checks → contract review (reviewer + skeptic subagents) → tick status, log contract requests, write `docs/smoke-tests/mvp-<n>.md` |
 | `/verify` | build_runner, format check, analyze, test, and a report |
 | `/sync-contract` | apply new `../contract/CHANGELOG.md` entries and `../contract/conformance-report.md` items |
 

@@ -1,6 +1,8 @@
 import 'dart:typed_data';
 
 import 'package:am_remote/core/api_client.dart';
+import 'package:am_remote/core/models/app_search.dart';
+import 'package:am_remote/core/models/modes.dart';
 import 'package:am_remote/core/models/player_state.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -475,6 +477,230 @@ void main() {
       _client(adapter).getStatus(),
       throwsA(isA<ApiException>().having((e) => e.code, 'code', 'INTERNAL')),
     );
+  });
+
+  group('MVP 4: modes, queue and app search', () {
+    const modesJson = '{"shuffle":true,"repeat":"all"}';
+    const queueJson =
+        '{"items":[{"index":0,"title":"A","artist":"X","album":"Y",'
+        '"duration_ms":1000,"source":"queue"},'
+        '{"index":1,"title":"B","artist":"","album":"","duration_ms":0,'
+        '"source":"autoplay"}]}';
+    const searchJson =
+        '{"results":[{"section":"Songs","index":0,"kind":"song",'
+        '"title":"T","subtitle":"S"}]}';
+
+    test('getModes GETs /player/modes', () async {
+      final adapter = FakeHttpAdapter(
+        (_) => FakeHttpAdapter.json(modesJson, 200),
+      );
+      final modes = await _client(adapter).getModes();
+
+      expect((modes.shuffle, modes.repeat), (true, RepeatSetting.all));
+      final sent = adapter.requests.single;
+      expect((sent.method, sent.uri.path), ('GET', '/api/v1/player/modes'));
+      expect(sent.headers['Authorization'], 'Bearer $fakeToken');
+    });
+
+    test('setModes POSTs only what it changes, and reads the answer', () async {
+      final bodies = <Object?>[];
+      final adapter = FakeHttpAdapter((options) {
+        bodies.add(options.data);
+        return FakeHttpAdapter.json(modesJson, 200);
+      });
+      final client = _client(adapter);
+
+      final modes = await client.setModes(shuffle: true);
+      await client.setModes(repeat: RepeatSetting.one);
+      await client.setModes(shuffle: false, repeat: RepeatSetting.off);
+
+      expect(
+        modes.repeat,
+        RepeatSetting.all,
+        reason: 'the answer, not a guess',
+      );
+      expect(bodies, [
+        {'shuffle': true},
+        {'repeat': 'one'},
+        {'shuffle': false, 'repeat': 'off'},
+      ]);
+      expect(adapter.requests.first.method, 'POST');
+      expect(adapter.requests.first.uri.path, '/api/v1/player/modes');
+    });
+
+    test('getQueue GETs /queue and reads the items', () async {
+      final adapter = FakeHttpAdapter(
+        (_) => FakeHttpAdapter.json(queueJson, 200),
+      );
+      final items = await _client(adapter).getQueue();
+
+      expect(items.map((i) => (i.index, i.title, i.isAutoplay)), [
+        (0, 'A', false),
+        (1, 'B', true),
+      ]);
+      expect(adapter.requests.single.uri.path, '/api/v1/queue');
+    });
+
+    test('a queue answer that is a bare list is a format error', () async {
+      final adapter = FakeHttpAdapter((_) => FakeHttpAdapter.json('[]', 200));
+      await expectLater(
+        _client(adapter).getQueue(),
+        throwsA(isA<FormatException>()),
+      );
+    });
+
+    test('playQueueItem POSTs index and title', () async {
+      Object? body;
+      final adapter = FakeHttpAdapter((options) {
+        body = options.data;
+        return ResponseBody.fromString('', 204);
+      });
+      await _client(adapter).playQueueItem(3, 'Some Song');
+
+      expect(body, {'index': 3, 'title': 'Some Song'});
+      expect(adapter.requests.single.uri.path, '/api/v1/queue/play');
+    });
+
+    test('appSearch GETs /app-search with q and scope', () async {
+      final adapter = FakeHttpAdapter(
+        (_) => FakeHttpAdapter.json(searchJson, 200),
+      );
+      final results = await _client(adapter)
+          .appSearch('tulus & friends', scope: SearchScope.library);
+
+      expect(results.single.title, 'T');
+      final sent = adapter.requests.single;
+      expect(sent.uri.path, '/api/v1/app-search');
+      expect(sent.uri.queryParameters, {
+        'q': 'tulus & friends',
+        'scope': 'library',
+      });
+    });
+
+    test('appSearch asks for the catalog by default', () async {
+      final adapter = FakeHttpAdapter(
+        (_) => FakeHttpAdapter.json(searchJson, 200),
+      );
+      await _client(adapter).appSearch('ab');
+      expect(adapter.requests.single.uri.queryParameters['scope'], 'catalog');
+    });
+
+    test('playAppResult POSTs q, scope, section, index and title', () async {
+      Object? body;
+      final adapter = FakeHttpAdapter((options) {
+        body = options.data;
+        return ResponseBody.fromString('', 204);
+      });
+      await _client(adapter).playAppResult(
+        q: 'example song',
+        scope: SearchScope.library,
+        section: 'Songs',
+        index: 0,
+        title: 'Example Song',
+      );
+
+      expect(body, {
+        'q': 'example song',
+        'scope': 'library',
+        'section': 'Songs',
+        'index': 0,
+        'title': 'Example Song',
+      });
+      expect(adapter.requests.single.uri.path, '/api/v1/app-search/play');
+    });
+
+    test('every one of them waits for the long timeout, not 10 s', () async {
+      final calls = <(String, String, Future<Object?> Function(DioApiClient))>[
+        ('getModes', modesJson, (c) => c.getModes()),
+        ('setModes', modesJson, (c) => c.setModes(shuffle: true)),
+        ('getQueue', queueJson, (c) => c.getQueue()),
+        ('playQueueItem', '', (c) => c.playQueueItem(0, 'A')),
+        ('appSearch', searchJson, (c) => c.appSearch('ab')),
+        (
+          'playAppResult',
+          '',
+          (c) => c.playAppResult(
+            q: 'ab',
+            scope: SearchScope.catalog,
+            section: 'Songs',
+            index: 0,
+            title: 'A',
+          ),
+        ),
+      ];
+      for (final (name, response, call) in calls) {
+        final adapter = FakeHttpAdapter(
+          (_) => response.isEmpty
+              ? ResponseBody.fromString('', 204)
+              : FakeHttpAdapter.json(response, 200),
+        );
+        await call(_client(adapter));
+        expect(
+          adapter.requests.single.receiveTimeout,
+          uiOperationTimeout,
+          reason: name,
+        );
+      }
+      expect(
+        uiOperationTimeout,
+        greaterThanOrEqualTo(const Duration(seconds: 45)),
+      );
+    });
+
+    test('a 401 on any of them goes back to pairing', () async {
+      final calls = <(String, Future<Object?> Function(DioApiClient))>[
+        ('getModes', (c) => c.getModes()),
+        ('setModes', (c) => c.setModes(shuffle: true)),
+        ('getQueue', (c) => c.getQueue()),
+        ('playQueueItem', (c) => c.playQueueItem(0, 'A')),
+        ('appSearch', (c) => c.appSearch('ab')),
+        (
+          'playAppResult',
+          (c) => c.playAppResult(
+            q: 'ab',
+            scope: SearchScope.catalog,
+            section: 'Songs',
+            index: 0,
+            title: 'A',
+          ),
+        ),
+      ];
+      for (final (name, call) in calls) {
+        var unauthorized = 0;
+        final adapter = FakeHttpAdapter(
+          (_) => FakeHttpAdapter.json(_errorBody('UNAUTHORIZED'), 401),
+        );
+        final client = _client(adapter, onUnauthorized: () => unauthorized++);
+
+        await expectLater(
+          call(client),
+          throwsA(isA<ApiException>()),
+          reason: name,
+        );
+        expect(unauthorized, 1, reason: name);
+      }
+    });
+
+    test('501 and 409 arrive as typed errors', () async {
+      for (final (code, status) in [
+        ('NOT_SUPPORTED', 501),
+        ('APPLE_MUSIC_NOT_RUNNING', 409),
+        ('NOT_FOUND', 404),
+      ]) {
+        final adapter = FakeHttpAdapter(
+          (_) => FakeHttpAdapter.json(_errorBody(code), status),
+        );
+        await expectLater(
+          _client(adapter).getQueue(),
+          throwsA(
+            isA<ApiException>()
+                .having((e) => e.code, 'code', code)
+                .having((e) => e.status, 'status', status),
+          ),
+          reason: code,
+        );
+      }
+    });
   });
 
   test('204 with no body is OK and is not decoded', () async {

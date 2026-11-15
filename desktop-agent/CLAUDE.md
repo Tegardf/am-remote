@@ -44,6 +44,7 @@ src/
 - **Playlists and songs (MVP 3), verified 2026-11-14 — see `docs/spikes/link-playback.md`:** links never autoplay; `music://` links only navigate. Playlists: sidebar `NavigationViewItem`s whose AutomationId ends `IKIND:ePlaylist` (that id is the contract id); select it, wait for the page header `ContainerDetailHeaderLockupRegularContent` to carry the playlist name, invoke `PlayButtonElement`. A song: open its `music://` link, find the page row `"Track <n> <title> <duration>"` (not the queue pane's rows), invoke the button inside the row, then the menu entry `Play “<title>”`. Never simulate keys or the mouse. Selecting the sidebar entry "Playlists" **toggles** the list.
 - **UI Automation speed:** never ask UI Automation to list or search the desktop's windows (about 10 s: it queries every app's provider). Find Apple Music's windows with Win32 `EnumWindows` and ask UI Automation only about them; scope searches to a small container.
 - **`uia` feature:** on by default. `cargo build --no-default-features` leaves it out; `/playlists`, `/play/playlist` and `/play/track` then answer `501 NOT_SUPPORTED`. Run the checks in both modes.
+- **MVP 4 spike, 2026-11-14 — see `docs/spikes/mvp4.md`:** shuffle/repeat only through UI Automation (SMTC accepts the calls but does nothing, and reports no state); the queue pane exposes at most ~20 rows and a row cannot be played by pattern (skip with SMTC `Next` n+1 times instead); Apple Music's own search works through `SetValue` (library results play on `Invoke`, catalog results only navigate). Probes: `examples/spike_mvp4_*`, shared helper `examples/spike_common/`.
 - **Probes:** `examples/` holds the programs that found these facts (`library_check`, `spike_*`, `uia_*`, `audio_sessions_detail`, …). Re-run them when an Apple Music update breaks something.
 
 ## Conventions
@@ -63,8 +64,9 @@ cargo test --no-default-features   # without UI Automation (the `uia` feature)
 ```
 
 ## Current status
-- Contract changes applied: C-005 (see ../contract/CHANGELOG.md; update via /sync-contract)
+- Contract changes applied: C-007 (see ../contract/CHANGELOG.md; update via /sync-contract)
 - [x] MVP 0 — server skeleton, tray, pairing, mDNS
 - [x] MVP 1 — SMTC controls, Core Audio volume
 - [x] MVP 2 — metadata, artwork, WebSocket push; UIA queue spike
 - [x] MVP 3 — link-playback spike, playlists, search, play track
+- [x] MVP 4 — shuffle/repeat, queue, app search (contract C-006)
